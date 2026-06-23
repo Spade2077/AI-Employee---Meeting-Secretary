@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -60,6 +61,7 @@ type volcanoSession struct {
 	resourceID string
 	conn       *websocket.Conn
 	writeMu    sync.Mutex
+	done       chan struct{}
 }
 
 func NewVolcanoAdapterFromEnv() (*VolcanoAdapter, error) {
@@ -126,8 +128,21 @@ func (a *VolcanoAdapter) StopSession(ctx context.Context, meetingID string) erro
 		return nil
 	}
 
-	_ = a.sendAudioPacket(ctx, session, nil, true)
-	return session.conn.Close()
+	if err := a.sendAudioPacket(ctx, session, nil, true); err != nil {
+		_ = session.conn.Close()
+		return err
+	}
+
+	select {
+	case <-session.done:
+		return nil
+	case <-ctx.Done():
+		_ = session.conn.Close()
+		return ctx.Err()
+	case <-time.After(2 * time.Second):
+		_ = session.conn.Close()
+		return nil
+	}
 }
 
 func (a *VolcanoAdapter) Results() <-chan TranscriptResult {
@@ -148,7 +163,12 @@ func (a *VolcanoAdapter) Close() error {
 	a.mu.Unlock()
 
 	for _, session := range sessions {
-		_ = session.conn.Close()
+		_ = a.sendAudioPacket(context.Background(), session, nil, true)
+		select {
+		case <-session.done:
+		case <-time.After(500 * time.Millisecond):
+			_ = session.conn.Close()
+		}
 	}
 	return nil
 }
@@ -181,17 +201,21 @@ func (a *VolcanoAdapter) dial(ctx context.Context, meetingID string) (*volcanoSe
 		u, _ := url.Parse(volcanoASRURL)
 		conn, resp, err := websocket.DefaultDialer.DialContext(ctx, u.String(), header)
 		if err == nil {
+			log.Printf("volcano stt connected meeting=%s resource_id=%s", meetingID, resourceID)
 			return &volcanoSession{
 				meetingID:  meetingID,
 				connectID:  connectID,
 				resourceID: resourceID,
 				conn:       conn,
+				done:       make(chan struct{}),
 			}, nil
 		}
 		if resp != nil {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			log.Printf("volcano stt resource failed meeting=%s resource_id=%s status=%s body=%s", meetingID, resourceID, resp.Status, string(body))
 			lastErr = fmt.Errorf("resource_id=%s status=%s body=%s", resourceID, resp.Status, string(body))
 		} else {
+			log.Printf("volcano stt dial failed meeting=%s resource_id=%s: %v", meetingID, resourceID, err)
 			lastErr = err
 		}
 	}
@@ -268,6 +292,7 @@ func (a *VolcanoAdapter) sendAudioPacket(ctx context.Context, session *volcanoSe
 }
 
 func (a *VolcanoAdapter) readLoop(session *volcanoSession) {
+	defer close(session.done)
 	for {
 		_, msg, err := session.conn.ReadMessage()
 		if err != nil {

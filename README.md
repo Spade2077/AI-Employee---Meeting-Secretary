@@ -5,7 +5,7 @@
 ## 功能
 
 - Go HTTP 服务
-- 会议状态机：`standby / recording / soft_paused / hard_muted / ending / ended`
+- 会议状态机：`standby / recording / soft_paused / ending / ended`
 - SQLite 本地存储
 - WebSocket 推送 `state_update`
 - 极简调试页面
