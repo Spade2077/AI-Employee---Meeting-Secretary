@@ -19,9 +19,10 @@ func main() {
 	loadDotEnv(filepath.Join("..", "volcano-asr-demo", ".env"))
 
 	cfg := Config{
-		Addr:        envOrDefault("MEETING_CORE_ADDR", ":8090"),
-		DB:          envOrDefault("MEETING_CORE_DB", "./data/meeting-core.db"),
-		STTProvider: envOrDefault("STT_PROVIDER", "mock"),
+		Addr:          envOrDefault("MEETING_CORE_ADDR", ":8090"),
+		DB:            envOrDefault("MEETING_CORE_DB", "./data/meeting-core.db"),
+		STTProvider:   envOrDefault("STT_PROVIDER", "mock"),
+		PublicBaseURL: envOrDefault("MEETING_PUBLIC_BASE_URL", ""),
 	}
 
 	if err := os.MkdirAll(filepath.Dir(cfg.DB), 0755); err != nil {
@@ -66,6 +67,7 @@ func main() {
 	go server.consumeSTT(context.Background())
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/share/", server.handleSharePage)
 	mux.HandleFunc("/", server.handleIndex)
 	mux.HandleFunc("/ws", server.handleWebSocket)
 	mux.HandleFunc("/api/llm-config", server.handleLLMConfig)

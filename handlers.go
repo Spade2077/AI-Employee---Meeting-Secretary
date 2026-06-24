@@ -16,35 +16,43 @@ import (
 func (s *Server) handleLLMConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		cfg, err := s.store.GetLLMConfig(r.Context())
+		useCase := normalizeLLMUseCase(r.URL.Query().Get("useCase"))
+		cfg, err := s.store.GetLLMConfigFor(r.Context(), useCase)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, cfg)
 	case http.MethodPost:
-		current, err := s.store.GetLLMConfig(r.Context())
+		var req struct {
+			UseCase      string `json:"useCase"`
+			BaseURL      string `json:"baseUrl"`
+			APIKey       string `json:"apiKey"`
+			Model        string `json:"model"`
+			ThinkingMode string `json:"thinkingMode"`
+			ClearAPIKey  bool   `json:"clearApiKey"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		useCase := normalizeLLMUseCase(req.UseCase)
+		if req.UseCase == "" {
+			useCase = normalizeLLMUseCase(r.URL.Query().Get("useCase"))
+		}
+		current, err := s.store.GetLLMConfigFor(r.Context(), useCase)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		var req struct {
-			BaseURL     string `json:"baseUrl"`
-			APIKey      string `json:"apiKey"`
-			Model       string `json:"model"`
-			ClearAPIKey bool   `json:"clearApiKey"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
 		apiKey := current.apiKey
 		if req.ClearAPIKey {
 			apiKey = ""
 		} else if strings.TrimSpace(req.APIKey) != "" {
 			apiKey = req.APIKey
 		}
-		cfg, err := s.store.SaveLLMConfig(r.Context(), LLMConfig{
-			BaseURL: req.BaseURL,
-			Model:   req.Model,
-			apiKey:  apiKey,
+		cfg, err := s.store.SaveLLMConfigFor(r.Context(), useCase, LLMConfig{
+			BaseURL:      req.BaseURL,
+			Model:        req.Model,
+			ThinkingMode: req.ThinkingMode,
+			apiKey:       apiKey,
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -174,6 +182,10 @@ func (s *Server) handleMeetingAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, events)
+	case r.Method == http.MethodGet && action == "minutes.md":
+		s.handleMinutesMarkdown(w, r, meetingID)
+	case r.Method == http.MethodGet && action == "share-qr.png":
+		s.handleShareQRCode(w, r, meetingID)
 	default:
 		writeError(w, http.StatusNotFound, "unknown action")
 	}

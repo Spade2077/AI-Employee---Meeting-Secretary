@@ -15,9 +15,10 @@ func CanUploadAudio(status MeetingStatus) bool {
 }
 
 type Config struct {
-	Addr        string
-	DB          string
-	STTProvider string
+	Addr          string
+	DB            string
+	STTProvider   string
+	PublicBaseURL string
 }
 
 type LLMUseCase string
@@ -26,6 +27,12 @@ const (
 	LLMUseCaseDefault      LLMUseCase = "default"
 	LLMUseCaseIntelligence LLMUseCase = "intelligence"
 	LLMUseCaseInteraction  LLMUseCase = "interaction"
+)
+
+const (
+	LLMThinkingDefault  = "default"
+	LLMThinkingEnabled  = "enabled"
+	LLMThinkingDisabled = "disabled"
 )
 
 type Meeting struct {
@@ -66,10 +73,12 @@ type Utterance struct {
 }
 
 type LLMConfig struct {
-	BaseURL   string `json:"baseUrl"`
-	Model     string `json:"model"`
-	HasAPIKey bool   `json:"hasApiKey"`
-	UpdatedAt string `json:"updatedAt,omitempty"`
+	UseCase      LLMUseCase `json:"useCase"`
+	BaseURL      string     `json:"baseUrl"`
+	Model        string     `json:"model"`
+	ThinkingMode string     `json:"thinkingMode"`
+	HasAPIKey    bool       `json:"hasApiKey"`
+	UpdatedAt    string     `json:"updatedAt,omitempty"`
 
 	apiKey string
 }
@@ -106,6 +115,14 @@ type MeetingActionItem struct {
 	UpdatedAt  string `json:"updatedAt"`
 }
 
+type ActionItemMutation struct {
+	Task       string
+	Owner      string
+	DueDate    string
+	Status     string
+	SourceText string
+}
+
 type IntelligenceSnapshot struct {
 	Type        string              `json:"type"`
 	MeetingID   string              `json:"meetingId"`
@@ -135,31 +152,67 @@ type ActionItemExtraction struct {
 }
 
 type InteractionCommand struct {
-	Intent      string  `json:"intent"`
-	TargetType  string  `json:"target_type"`
-	TargetIndex int     `json:"target_index"`
-	TargetID    string  `json:"target_id"`
-	Confidence  float64 `json:"confidence"`
-	NeedConfirm bool    `json:"need_confirm"`
-	Reply       string  `json:"reply"`
-	Reason      string  `json:"reason"`
+	Intent        string   `json:"intent"`
+	TargetType    string   `json:"target_type"`
+	TargetIndex   int      `json:"target_index"`
+	TargetID      string   `json:"target_id"`
+	SourceIndices []int    `json:"source_indices,omitempty"`
+	SourceIDs     []string `json:"source_ids,omitempty"`
+	Task          string   `json:"task,omitempty"`
+	Owner         string   `json:"owner,omitempty"`
+	DueDate       string   `json:"due_date,omitempty"`
+	Status        string   `json:"status,omitempty"`
+	Content       string   `json:"content,omitempty"`
+	Confidence    float64  `json:"confidence"`
+	NeedConfirm   bool     `json:"need_confirm"`
+	Reply         string   `json:"reply"`
+	Reason        string   `json:"reason"`
 }
 
 type InteractionEvent struct {
-	ID              string `json:"id"`
-	MeetingID       string `json:"meetingId"`
-	RawTranscript   string `json:"rawTranscript"`
-	WakeWord        string `json:"wakeWord"`
-	Instruction     string `json:"instruction"`
-	Intent          string `json:"intent"`
-	TargetType      string `json:"targetType"`
-	TargetIndex     int    `json:"targetIndex"`
-	TargetID        string `json:"targetId,omitempty"`
-	CommandJSON     string `json:"commandJson"`
-	ExecutionStatus string `json:"executionStatus"`
-	Message         string `json:"message"`
-	ErrorMessage    string `json:"errorMessage,omitempty"`
-	CreatedAt       string `json:"createdAt"`
+	ID              string             `json:"id"`
+	MeetingID       string             `json:"meetingId"`
+	RawTranscript   string             `json:"rawTranscript"`
+	WakeWord        string             `json:"wakeWord"`
+	Instruction     string             `json:"instruction"`
+	Intent          string             `json:"intent"`
+	TargetType      string             `json:"targetType"`
+	TargetIndex     int                `json:"targetIndex"`
+	TargetID        string             `json:"targetId,omitempty"`
+	CommandJSON     string             `json:"commandJson"`
+	ExecutionStatus string             `json:"executionStatus"`
+	Message         string             `json:"message"`
+	ErrorMessage    string             `json:"errorMessage,omitempty"`
+	CreatedAt       string             `json:"createdAt"`
+	CompletedAt     string             `json:"completedAt,omitempty"`
+	DurationMs      int64              `json:"durationMs"`
+	Timing          *InteractionTiming `json:"timing,omitempty"`
+}
+
+type InteractionTiming struct {
+	StartedAt   string                   `json:"startedAt,omitempty"`
+	CompletedAt string                   `json:"completedAt,omitempty"`
+	TotalMs     int64                    `json:"totalMs"`
+	Stages      []InteractionTimingStage `json:"stages"`
+}
+
+type InteractionTimingStage struct {
+	Key        string `json:"key"`
+	Label      string `json:"label"`
+	DurationMs int64  `json:"durationMs"`
+	Detail     string `json:"detail,omitempty"`
+}
+
+type InteractionUndoRecord struct {
+	ID                 string `json:"id"`
+	MeetingID          string `json:"meetingId"`
+	InteractionEventID string `json:"interactionEventId"`
+	UndoType           string `json:"undoType"`
+	UndoJSON           string `json:"undoJson"`
+	IsUsed             bool   `json:"isUsed"`
+	UsedByEventID      string `json:"usedByEventId,omitempty"`
+	CreatedAt          string `json:"createdAt"`
+	UsedAt             string `json:"usedAt,omitempty"`
 }
 
 type InteractionUpdate struct {
@@ -168,6 +221,15 @@ type InteractionUpdate struct {
 	Event     *InteractionEvent     `json:"event"`
 	Snapshot  *IntelligenceSnapshot `json:"snapshot,omitempty"`
 	Timestamp string                `json:"timestamp"`
+}
+
+type InteractionStatusUpdate struct {
+	Type      string `json:"type"`
+	MeetingID string `json:"meetingId"`
+	EventID   string `json:"eventId,omitempty"`
+	Status    string `json:"status"`
+	Message   string `json:"message"`
+	Timestamp string `json:"timestamp"`
 }
 
 type TranscriptDelta struct {

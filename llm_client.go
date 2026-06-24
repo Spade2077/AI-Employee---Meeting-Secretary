@@ -30,6 +30,11 @@ func (OpenAICompatibleLLMClient) Complete(ctx context.Context, cfg *LLMConfig, m
 		"messages":    messages,
 		"temperature": temperature,
 	}
+	if mode := normalizeLLMThinkingMode(cfg.ThinkingMode); mode != LLMThinkingDefault {
+		reqBody["thinking"] = map[string]any{
+			"type": mode,
+		}
+	}
 	reqBytes, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", err

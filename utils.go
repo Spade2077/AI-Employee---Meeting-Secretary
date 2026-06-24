@@ -114,6 +114,28 @@ func envForLLMUseCase(useCase LLMUseCase, suffix string) string {
 	return os.Getenv("LLM_" + suffix)
 }
 
+func normalizeLLMUseCase(value string) LLMUseCase {
+	switch LLMUseCase(strings.ToLower(strings.TrimSpace(value))) {
+	case LLMUseCaseIntelligence:
+		return LLMUseCaseIntelligence
+	case LLMUseCaseInteraction:
+		return LLMUseCaseInteraction
+	default:
+		return LLMUseCaseDefault
+	}
+}
+
+func normalizeLLMThinkingMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case LLMThinkingEnabled, "enable", "on", "true", "1":
+		return LLMThinkingEnabled
+	case LLMThinkingDisabled, "disable", "off", "false", "0":
+		return LLMThinkingDisabled
+	default:
+		return LLMThinkingDefault
+	}
+}
+
 func extractJSONObject(content string) string {
 	content = strings.TrimSpace(content)
 	content = strings.TrimPrefix(content, "```json")
