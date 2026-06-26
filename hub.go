@@ -1,3 +1,4 @@
+// 本文件负责管理 WebSocket 连接和广播消息。
 package main
 
 import "github.com/gorilla/websocket"

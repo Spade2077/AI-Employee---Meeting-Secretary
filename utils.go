@@ -1,3 +1,4 @@
+// 本文件负责通用文本处理、ID 生成和辅助工具函数。
 package main
 
 import (

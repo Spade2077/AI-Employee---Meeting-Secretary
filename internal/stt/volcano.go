@@ -1,3 +1,4 @@
+// 本文件负责火山 ASR WebSocket 协议接入和转写结果解析。
 package stt
 
 import (

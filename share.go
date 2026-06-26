@@ -1,10 +1,10 @@
+// 本文件负责会议纪要分享页、Markdown 导出和二维码生成。
 package main
 
 import (
 	"bytes"
 	"context"
 	"fmt"
-	"html"
 	"net"
 	"net/http"
 	"net/url"
@@ -25,46 +25,11 @@ func (s *Server) handleSharePage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "missing meeting id")
 		return
 	}
-	_, page, err := s.buildMeetingMinutes(r.Context(), meetingID)
-	if err != nil {
+	if _, err := s.store.GetMeeting(r.Context(), meetingID); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = fmt.Fprintf(w, `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>%s - 会议纪要</title>
-  <style>
-    body{margin:0;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f8fafc;color:#111827;}
-    main{max-width:860px;margin:0 auto;padding:24px 16px 48px;}
-    h1{font-size:24px;margin:0 0 8px;}
-    .meta{color:#64748b;font-size:13px;margin-bottom:16px;}
-    .actions{display:flex;gap:10px;flex-wrap:wrap;margin:18px 0 24px;}
-    a.button{display:inline-flex;align-items:center;height:38px;padding:0 14px;border-radius:8px;background:#2563eb;color:white;text-decoration:none;font-size:14px;font-weight:700;}
-    section{background:white;border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin-top:14px;}
-    pre{white-space:pre-wrap;word-break:break-word;line-height:1.65;font-size:14px;margin:0;}
-  </style>
-</head>
-<body>
-<main>
-  <h1>%s</h1>
-  <div class="meta">%s</div>
-  <div class="actions">
-    <a class="button" href="/api/meetings/%s/minutes.md">下载 Markdown</a>
-  </div>
-  <section><pre>%s</pre></section>
-</main>
-</body>
-</html>`,
-		html.EscapeString(page.Title),
-		html.EscapeString(page.Title),
-		html.EscapeString(page.Meta),
-		url.PathEscape(meetingID),
-		html.EscapeString(page.Markdown))
+	s.serveFrontendHTML(w, r, "share.html")
 }
 
 func (s *Server) handleMinutesMarkdown(w http.ResponseWriter, r *http.Request, meetingID string) {

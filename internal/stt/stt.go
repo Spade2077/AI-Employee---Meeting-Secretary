@@ -1,3 +1,4 @@
+// 本文件负责定义 ASR 适配器接口和通用音频、转写事件结构。
 package stt
 
 import (
@@ -50,11 +51,9 @@ type Adapter interface {
 
 func NewAdapter(provider string) (Adapter, error) {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "", "mock":
-		return NewMockAdapter(), nil
-	case "volcano", "volcano_asr", "volcano-asr":
+	case "", "volcano", "volcano_asr", "volcano-asr":
 		return NewVolcanoAdapterFromEnv()
 	default:
-		return nil, fmt.Errorf("unsupported STT_PROVIDER %q", provider)
+		return nil, fmt.Errorf("unsupported STT_PROVIDER %q; supported providers: volcano", provider)
 	}
 }

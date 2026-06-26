@@ -1,3 +1,4 @@
+// 本文件负责会议、转写、LLM 配置和交互事件的核心数据结构。
 package main
 
 type MeetingStatus string
@@ -123,34 +124,6 @@ type ActionItemMutation struct {
 	SourceText string
 }
 
-type IntelligenceSnapshot struct {
-	Type        string              `json:"type"`
-	MeetingID   string              `json:"meetingId"`
-	Summary     *MeetingSummary     `json:"summary,omitempty"`
-	Decisions   []MeetingDecision   `json:"decisions"`
-	ActionItems []MeetingActionItem `json:"actionItems"`
-	Timestamp   string              `json:"timestamp"`
-}
-
-type IntelligenceExtraction struct {
-	Summary     string                 `json:"summary"`
-	Decisions   []DecisionExtraction   `json:"decisions"`
-	ActionItems []ActionItemExtraction `json:"action_items"`
-}
-
-type DecisionExtraction struct {
-	Content    string `json:"content"`
-	SourceText string `json:"source_text"`
-}
-
-type ActionItemExtraction struct {
-	Task       string `json:"task"`
-	Owner      string `json:"owner"`
-	DueDate    string `json:"due_date"`
-	Status     string `json:"status"`
-	SourceText string `json:"source_text"`
-}
-
 type InteractionCommand struct {
 	Intent        string   `json:"intent"`
 	TargetType    string   `json:"target_type"`
@@ -167,6 +140,7 @@ type InteractionCommand struct {
 	NeedConfirm   bool     `json:"need_confirm"`
 	Reply         string   `json:"reply"`
 	Reason        string   `json:"reason"`
+	Instruction   string   `json:"-"`
 }
 
 type InteractionEvent struct {

@@ -1,3 +1,4 @@
+// 本文件负责验证会中交互命令执行、合并和撤销行为。
 package main
 
 import (
@@ -268,6 +269,31 @@ func TestInteractionCommandExecutionCoversSupportedIntents(t *testing.T) {
 	if snapshot.Summary == nil || !strings.Contains(snapshot.Summary.Content, "ASR stability") {
 		t.Fatalf("expected rewritten summary, got %#v", snapshot.Summary)
 	}
+
+	if _, err := store.RewriteSummary(ctx, meetingID, "会议摘要：本次会议同步培训试运行安排。风险提示：报名人数和网络稳定性需要关注。缺失项提醒：参训名单仍待确认。"); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:      "rewrite_summary_section",
+		TargetType:  "summary",
+		Content:     "重点突出人员时间冲突和场地设备检查",
+		Reason:      "风险",
+		Instruction: "会议摘要里关于风险那段重新写一下，重点突出人员时间冲突和场地设备检查。",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = store.GetIntelligenceSnapshot(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Summary == nil ||
+		!strings.Contains(snapshot.Summary.Content, "会议摘要") ||
+		!strings.Contains(snapshot.Summary.Content, "风险提示") ||
+		!strings.Contains(snapshot.Summary.Content, "人员时间冲突") ||
+		!strings.Contains(snapshot.Summary.Content, "缺失项提醒") {
+		t.Fatalf("expected section rewrite to preserve summary context, got %#v", snapshot.Summary)
+	}
 }
 
 func TestInteractionDecisionCommands(t *testing.T) {
@@ -486,6 +512,7 @@ func newInteractionStore(t *testing.T, ctx context.Context) (*Store, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 
 	store := &Store{db: db}

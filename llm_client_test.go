@@ -1,3 +1,4 @@
+// 本文件负责验证 LLM 请求体和思考模式参数。
 package main
 
 import (

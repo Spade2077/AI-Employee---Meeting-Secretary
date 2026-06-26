@@ -1,3 +1,4 @@
+// 本文件负责应用核心类型和 Server 依赖装配结构。
 package main
 
 import (

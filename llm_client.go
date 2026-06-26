@@ -1,3 +1,4 @@
+// 本文件负责调用兼容 OpenAI 协议的 LLM 接口。
 package main
 
 import (

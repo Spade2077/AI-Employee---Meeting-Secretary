@@ -1,3 +1,4 @@
+// 本文件负责构造状态变化和转写推送事件。
 package main
 
 func (s *Server) stateUpdate(meeting *Meeting, event *StateEvent) StateUpdate {

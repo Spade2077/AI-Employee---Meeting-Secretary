@@ -1,9 +1,9 @@
+// 本文件负责本地 HTTP API 路由和请求处理。
 package main
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -140,8 +140,6 @@ func (s *Server) handleMeetingAction(w http.ResponseWriter, r *http.Request) {
 		s.endMeetingHTTP(w, r, meetingID)
 	case r.Method == http.MethodPost && action == "utterances":
 		s.addUtteranceHTTP(w, r, meetingID)
-	case r.Method == http.MethodPost && action == "audio" && len(parts) == 3 && parts[2] == "mock":
-		s.mockAudioHTTP(w, r, meetingID)
 	case r.Method == http.MethodGet && action == "audio" && len(parts) == 3 && parts[2] == "ws":
 		s.audioWebSocket(w, r, meetingID)
 	case r.Method == http.MethodGet && action == "intelligence":
@@ -268,36 +266,6 @@ func (s *Server) addUtteranceHTTP(w http.ResponseWriter, r *http.Request, meetin
 		go s.scheduleIntelligenceAnalysis(context.Background(), meetingID)
 	}
 	writeJSON(w, http.StatusCreated, delta)
-}
-
-func (s *Server) mockAudioHTTP(w http.ResponseWriter, r *http.Request, meetingID string) {
-	meeting, err := s.store.GetMeeting(r.Context(), meetingID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
-		return
-	}
-	if !CanUploadAudio(MeetingStatus(meeting.Status)) {
-		writeError(w, http.StatusConflict, fmt.Sprintf("audio upload is blocked while meeting status is %s", meeting.Status))
-		return
-	}
-
-	var req struct {
-		Text string `json:"text"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	if err := s.sendAudioToSTT(r.Context(), stt.AudioChunk{
-		MeetingID: meetingID,
-		Data:      []byte(req.Text),
-		Format:    "mock/text",
-		Timestamp: time.Now().UTC(),
-	}); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"accepted":  true,
-		"meetingId": meetingID,
-	})
 }
 
 func (s *Server) audioWebSocket(w http.ResponseWriter, r *http.Request, meetingID string) {

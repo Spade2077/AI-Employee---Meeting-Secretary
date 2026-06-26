@@ -1,3 +1,4 @@
+// 本文件负责读取环境变量和本地运行配置。
 package main
 
 import (

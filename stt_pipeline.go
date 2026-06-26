@@ -1,3 +1,4 @@
+// 本文件负责音频到 ASR、转写入库和 WebSocket 推送链路。
 package main
 
 import (
