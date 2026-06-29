@@ -12,11 +12,18 @@ import (
 )
 
 type interactionUndoPayload struct {
-	Type         string             `json:"type"`
-	ActionItem   *MeetingActionItem `json:"action_item,omitempty"`
-	ActionItemID string             `json:"action_item_id,omitempty"`
-	Decision     *MeetingDecision   `json:"decision,omitempty"`
-	DecisionID   string             `json:"decision_id,omitempty"`
+	Type           string                `json:"type"`
+	Meeting        *Meeting              `json:"meeting,omitempty"`
+	ActionItem     *MeetingActionItem    `json:"action_item,omitempty"`
+	ActionItemID   string                `json:"action_item_id,omitempty"`
+	Decision       *MeetingDecision      `json:"decision,omitempty"`
+	DecisionID     string                `json:"decision_id,omitempty"`
+	Risk           *MeetingRisk          `json:"risk,omitempty"`
+	RiskID         string                `json:"risk_id,omitempty"`
+	Risks          []MeetingRisk         `json:"risks,omitempty"`
+	OpenQuestion   *MeetingOpenQuestion  `json:"open_question,omitempty"`
+	OpenQuestionID string                `json:"open_question_id,omitempty"`
+	OpenQuestions  []MeetingOpenQuestion `json:"open_questions,omitempty"`
 }
 
 func (s *Server) saveUndoRecord(ctx context.Context, meetingID, eventID string, payload interactionUndoPayload) error {
@@ -68,6 +75,16 @@ func (s *Server) undoLastInteraction(ctx context.Context, meetingID, eventID str
 
 func (s *Server) applyUndoPayload(ctx context.Context, meetingID string, payload interactionUndoPayload) (string, error) {
 	switch strings.TrimSpace(payload.Type) {
+	case "restore_meeting_title":
+		if payload.Meeting == nil {
+			return "撤销失败：缺少会议标题快照。", fmt.Errorf("undo meeting snapshot missing")
+		}
+		meeting, err := s.store.UpdateMeetingTitle(ctx, meetingID, payload.Meeting.Title, payload.Meeting.TitleLocked)
+		if err != nil {
+			return "撤销会议标题变更失败。", err
+		}
+		return fmt.Sprintf("已撤销上一步操作，会议标题恢复为：%s", meeting.Title), nil
+
 	case "restore_action_item":
 		if payload.ActionItem == nil {
 			return "撤销失败：缺少待办快照。", fmt.Errorf("undo action item snapshot missing")
@@ -117,6 +134,80 @@ func (s *Server) applyUndoPayload(ctx context.Context, meetingID string, payload
 			return "撤销新增决策失败。", err
 		}
 		return fmt.Sprintf("已撤销上一步操作，删除刚刚新增的决策：%s", decision.Content), nil
+
+	case "restore_risk":
+		if payload.Risk == nil {
+			return "撤销失败：缺少风险快照。", fmt.Errorf("undo risk snapshot missing")
+		}
+		payload.Risk.MeetingID = meetingID
+		risk, err := s.store.RestoreRisk(ctx, *payload.Risk)
+		if err != nil {
+			return "撤销风险变更失败。", err
+		}
+		return fmt.Sprintf("已撤销上一步操作，恢复风险：%s", risk.Content), nil
+
+	case "delete_risk":
+		riskID := strings.TrimSpace(payload.RiskID)
+		if riskID == "" && payload.Risk != nil {
+			riskID = payload.Risk.ID
+		}
+		if riskID == "" {
+			return "撤销失败：缺少风险 ID。", fmt.Errorf("undo risk id missing")
+		}
+		risk, err := s.store.DeleteRisk(ctx, meetingID, riskID)
+		if err != nil {
+			return "撤销新增风险失败。", err
+		}
+		return fmt.Sprintf("已撤销上一步操作，删除刚刚新增的风险：%s", risk.Content), nil
+
+	case "restore_risk_set":
+		if len(payload.Risks) == 0 {
+			return "撤销失败：缺少风险快照。", fmt.Errorf("undo risk set missing")
+		}
+		for _, risk := range payload.Risks {
+			risk.MeetingID = meetingID
+			if _, err := s.store.RestoreRisk(ctx, risk); err != nil {
+				return "撤销合并风险失败。", err
+			}
+		}
+		return fmt.Sprintf("已撤销上一步操作，恢复 %d 条风险。", len(payload.Risks)), nil
+
+	case "restore_open_question":
+		if payload.OpenQuestion == nil {
+			return "撤销失败：缺少待确认问题快照。", fmt.Errorf("undo open question snapshot missing")
+		}
+		payload.OpenQuestion.MeetingID = meetingID
+		question, err := s.store.RestoreOpenQuestion(ctx, *payload.OpenQuestion)
+		if err != nil {
+			return "撤销待确认问题变更失败。", err
+		}
+		return fmt.Sprintf("已撤销上一步操作，恢复待确认问题：%s", question.Question), nil
+
+	case "delete_open_question":
+		questionID := strings.TrimSpace(payload.OpenQuestionID)
+		if questionID == "" && payload.OpenQuestion != nil {
+			questionID = payload.OpenQuestion.ID
+		}
+		if questionID == "" {
+			return "撤销失败：缺少待确认问题 ID。", fmt.Errorf("undo open question id missing")
+		}
+		question, err := s.store.DeleteOpenQuestion(ctx, meetingID, questionID)
+		if err != nil {
+			return "撤销新增待确认问题失败。", err
+		}
+		return fmt.Sprintf("已撤销上一步操作，删除刚刚新增的待确认问题：%s", question.Question), nil
+
+	case "restore_open_question_set":
+		if len(payload.OpenQuestions) == 0 {
+			return "撤销失败：缺少待确认问题快照。", fmt.Errorf("undo open question set missing")
+		}
+		for _, question := range payload.OpenQuestions {
+			question.MeetingID = meetingID
+			if _, err := s.store.RestoreOpenQuestion(ctx, question); err != nil {
+				return "撤销合并待确认问题失败。", err
+			}
+		}
+		return fmt.Sprintf("已撤销上一步操作，恢复 %d 条待确认问题。", len(payload.OpenQuestions)), nil
 
 	default:
 		return "这一步操作暂时不支持撤销。", fmt.Errorf("unsupported undo payload type: %s", payload.Type)

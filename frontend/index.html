@@ -204,6 +204,8 @@
     }
     .action-board { border-top: 3px solid var(--blue); }
     .decision-board { border-top: 3px solid var(--green); }
+    .risk-board { border-top: 3px solid var(--red); }
+    .question-board { border-top: 3px solid var(--amber); }
     .insight-row {
       display: grid;
       grid-template-columns: minmax(0, 0.95fr) minmax(420px, 1.05fr);
@@ -287,6 +289,25 @@
       color: var(--muted);
       font-size: 12px;
     }
+    .mic-device-row {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: auto minmax(180px, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .mic-device-row select {
+      min-height: 34px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      padding: 0 10px;
+      color: var(--ink);
+      background: #fff;
+    }
+    .mic-device-row button {
+      min-height: 34px;
+      padding: 0 12px;
+    }
     .level-track {
       height: 8px;
       margin-top: 6px;
@@ -303,6 +324,10 @@
     .mic-note {
       grid-column: 1 / -1;
       color: #334155;
+    }
+    .mic-note.warning {
+      color: #b91c1c;
+      font-weight: 700;
     }
     .list {
       margin: 0;
@@ -439,6 +464,48 @@
     .item-status.completed {
       background: #ecfdf5;
       color: #15803d;
+    }
+    .missing-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .missing-tag,
+    .level-tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 0 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 750;
+    }
+    .missing-tag {
+      background: #fff7ed;
+      color: #c2410c;
+      border: 1px solid #fed7aa;
+    }
+    .level-tag {
+      margin-left: 6px;
+      background: #f1f5f9;
+      color: #475569;
+      border: 1px solid #cbd5e1;
+    }
+    .level-tag.high {
+      background: #fef2f2;
+      color: #b91c1c;
+      border-color: #fecaca;
+    }
+    .level-tag.medium {
+      background: #fffbeb;
+      color: #b45309;
+      border-color: #fde68a;
+    }
+    .level-tag.low {
+      background: #ecfdf5;
+      color: #15803d;
+      border-color: #bbf7d0;
     }
     .interaction-card {
       border-left: 3px solid var(--blue);
@@ -584,13 +651,6 @@
     .interaction-step.failed strong {
       color: #b91c1c;
     }
-    .share-panel {
-      display: none;
-      margin-top: 16px;
-    }
-    .share-panel.visible {
-      display: block;
-    }
     .share-layout {
       display: grid;
       grid-template-columns: 180px minmax(0, 1fr);
@@ -684,6 +744,9 @@
       header, .control-panel { grid-template-columns: 1fr; display: grid; }
       .status-strip { justify-content: flex-start; }
       .workspace, .insight-row { grid-template-columns: 1fr; }
+      .meeting-view-switcher { align-items: stretch; flex-direction: column; }
+      .meeting-view-switcher .segmented { min-width: 0; width: 100%; }
+      .share-layout { grid-template-columns: 1fr; }
       .interaction-phase-flow { grid-template-columns: 1fr; }
       .transcript-box { height: 420px; }
       .config-grid, .manual-row, .debug-grid, .intelligence-toolbar { grid-template-columns: 1fr; }
@@ -768,12 +831,78 @@
       font-size: 13px;
       background: #fff;
     }
+    .meeting-view-switcher {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 16px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .meeting-view-switcher .segmented {
+      min-width: 360px;
+    }
+    .view-hint {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .closing-panel {
+      display: none;
+      margin-top: 16px;
+      border-top: 3px solid var(--green);
+    }
+    .closing-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    body.page-meeting .meeting-view-switcher {
+      display: flex;
+    }
+    body.page-meeting[data-meeting-view="live"] .workspace,
+    body.page-meeting[data-meeting-view="live"] .closing-panel {
+      display: none;
+    }
+    body.page-meeting[data-meeting-view="live"] .meeting-insights {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    body.page-meeting[data-meeting-view="live"] .interaction-card {
+      display: none;
+    }
+    body.page-meeting[data-meeting-view="summary"] .transcript-panel,
+    body.page-meeting[data-meeting-view="summary"] .meeting-insights,
+    body.page-meeting[data-meeting-view="summary"] .closing-panel {
+      display: none;
+    }
+    body.page-meeting[data-meeting-view="summary"] .workspace {
+      display: grid;
+    }
+    body.page-meeting[data-meeting-view="closing"] .transcript-panel {
+      display: none;
+    }
+    body.page-meeting[data-meeting-view="closing"] .workspace {
+      display: grid;
+    }
+    body.page-meeting[data-meeting-view="closing"] .meeting-insights {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    body.page-meeting[data-meeting-view="closing"] .interaction-card {
+      display: none;
+    }
+    body.page-meeting[data-meeting-view="closing"] .closing-panel {
+      display: block;
+    }
     body.page-meeting .control-panel,
     body.page-meeting .settings {
       display: none;
     }
     body.page-admin .control-panel,
-    body.page-admin .share-panel,
     body.page-admin .workspace,
     body.page-admin .insight-row,
     body.page-admin .transcript-panel {
@@ -784,6 +913,44 @@
     }
     body.page-meeting .summary-actions button {
       display: none;
+    }
+    .share-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+    }
+    .share-modal.visible {
+      display: block;
+    }
+    .share-backdrop {
+      position: absolute;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.54);
+    }
+    .share-dialog {
+      position: relative;
+      width: min(680px, calc(100vw - 32px));
+      margin: 9vh auto 0;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      box-shadow: 0 24px 80px rgba(15, 23, 42, 0.28);
+    }
+    .share-dialog-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .share-dialog-header h2 {
+      margin-bottom: 4px;
+    }
+    .share-close {
+      min-width: 44px;
+      min-height: 36px;
     }
   </style>
 </head>
@@ -802,7 +969,6 @@
 <main>
   <nav class="app-nav">
     <a href="/meeting">会议展示</a>
-    <a href="/admin">后台设置</a>
     <a href="/debug">调试页面</a>
   </nav>
   <header>
@@ -816,10 +982,21 @@
         <strong id="statusText">standby</strong>
       </div>
       <div class="pill">会议 <span id="meetingId">none</span></div>
+      <div class="pill">标题 <span id="meetingTitle">未命名会议</span></div>
+      <div class="pill">类型 <span id="meetingType">unknown</span></div>
       <div class="pill">时长 <span id="duration">0s</span></div>
       <div class="pill">麦克风 <span id="micState">未连接</span></div>
     </div>
   </header>
+
+  <section class="meeting-view-switcher" aria-label="会议展示模式">
+    <div class="segmented" id="meetingViewButtons">
+      <button type="button" data-value="live" onclick="setMeetingView('live')">实时记录</button>
+      <button type="button" data-value="summary" onclick="setMeetingView('summary')">会议总结</button>
+      <button type="button" data-value="closing" onclick="setMeetingView('closing')">会议收尾</button>
+    </div>
+    <p id="meetingViewHint" class="view-hint">默认展示实时转写和会议摘要。</p>
+  </section>
 
   <section class="panel control-panel">
     <div>
@@ -836,6 +1013,13 @@
         <button onclick="addUtterance()">添加测试转写</button>
       </div>
       <div class="mic-debug">
+        <label class="mic-device-row">
+          <span>输入设备</span>
+          <select id="micDeviceSelect" onchange="selectAudioInputDevice(this.value)">
+            <option value="">浏览器默认输入</option>
+          </select>
+          <button type="button" onclick="refreshAudioInputDevices()">刷新</button>
+        </label>
         <div>
           本地输入 <strong id="localPeak">0</strong>
           <div class="level-track"><div id="localLevel" class="level-fill"></div></div>
@@ -845,24 +1029,49 @@
           <div class="level-track"><div id="serverLevel" class="level-fill"></div></div>
         </div>
         <div>采样率 <strong id="sampleRateLabel">-</strong></div>
+        <div>削波 <strong id="clipRatioLabel">0%</strong></div>
         <div>音频包 <strong id="packetCountLabel">0</strong></div>
         <div id="micDiagnosis" class="mic-note">等待麦克风连接。</div>
       </div>
     </div>
   </section>
 
-  <section id="sharePanel" class="panel share-panel">
-    <div class="share-layout">
-      <img id="shareQR" class="share-qr" alt="会议纪要二维码">
-      <div>
-        <h2>会议纪要二维码</h2>
-        <p class="notice">手机扫码查看会议纪要，并下载 Markdown 文档。</p>
-        <a id="shareLink" class="share-link" href="#" target="_blank" rel="noreferrer"></a>
-        <div class="share-actions">
-          <button onclick="openSharePage()">打开纪要页</button>
-          <button onclick="downloadMarkdown()">下载 Markdown</button>
+  <div id="sharePanel" class="share-modal" aria-hidden="true">
+    <div class="share-backdrop" onclick="closeShareModal()"></div>
+    <section class="share-dialog" role="dialog" aria-modal="true" aria-labelledby="shareDialogTitle">
+      <div class="share-dialog-header">
+        <div>
+          <span class="eyebrow">Minutes Share</span>
+          <h2 id="shareDialogTitle">会议纪要二维码</h2>
+          <p class="notice">手机扫码查看会议纪要，并下载 Markdown 文档。</p>
+        </div>
+        <button class="share-close" type="button" onclick="closeShareModal()">关闭</button>
+      </div>
+      <div class="share-layout">
+        <img id="shareQR" class="share-qr" alt="会议纪要二维码">
+        <div>
+          <a id="shareLink" class="share-link" href="#" target="_blank" rel="noreferrer"></a>
+          <div class="share-actions">
+            <button onclick="openSharePage()">打开纪要页</button>
+            <button onclick="downloadMarkdown()">下载 Markdown</button>
+          </div>
         </div>
       </div>
+    </section>
+  </div>
+
+  <section id="closingPanel" class="panel closing-panel">
+    <div class="section-heading">
+      <div>
+        <span class="eyebrow">Closing</span>
+        <h2>会议收尾</h2>
+        <p class="section-note">确认结构化结果后，可手动打开二维码弹窗用于会后查看和下载。</p>
+      </div>
+      <span id="shareReadyBadge" class="mini-count">未结束</span>
+    </div>
+    <div class="closing-actions">
+      <button type="button" onclick="openShareModal()">打开二维码</button>
+      <button type="button" onclick="downloadMarkdown()">下载 Markdown</button>
     </div>
   </section>
 
@@ -939,9 +1148,31 @@
       </div>
       <ol id="decisionsList" class="list board-list"></ol>
     </section>
+
+    <section class="panel board-panel risk-board">
+      <div class="board-heading">
+        <div>
+          <span class="eyebrow">Risks</span>
+          <h2>风险与阻塞</h2>
+        </div>
+        <strong id="riskCount" class="board-count">0</strong>
+      </div>
+      <ol id="risksList" class="list board-list"></ol>
+    </section>
+
+    <section class="panel board-panel question-board">
+      <div class="board-heading">
+        <div>
+          <span class="eyebrow">Open Questions</span>
+          <h2>待确认问题</h2>
+        </div>
+        <strong id="questionCount" class="board-count">0</strong>
+      </div>
+      <ol id="openQuestionsList" class="list board-list"></ol>
+    </section>
   </div>
 
-  <section class="insight-row">
+  <section class="insight-row meeting-insights">
     <div class="panel summary-panel">
       <div class="section-heading">
         <div>
@@ -1014,11 +1245,16 @@ let audioWSMeetingId = "";
 let currentSampleRate = 0;
 let activeInteractionEventId = "";
 let latestListMutation = null;
+let selectedAudioInputDeviceId = localStorage.getItem("meetingAudioInputDeviceId") || "";
+let latestClipRatio = 0;
+let currentMeetingView = localStorage.getItem("meetingView") || "live";
 const pageMode = window.__PAGE_MODE__ || "debug";
 const routeMeetingId = window.__ROUTE_MEETING_ID__ || "";
 const animatedListState = {
   action_items: { initialized: false, signatures: new Map() },
-  decisions: { initialized: false, signatures: new Map() }
+  decisions: { initialized: false, signatures: new Map() },
+  risks: { initialized: false, signatures: new Map() },
+  open_questions: { initialized: false, signatures: new Map() }
 };
 
 function applyPageMode() {
@@ -1031,6 +1267,46 @@ function applyPageMode() {
   } else if (pageMode === "meeting") {
     title.textContent = "AI 会议秘书大屏";
     subtitle.textContent = "会议状态、实时转写、摘要、待办、决策与会中交互";
+  }
+  applyMeetingView();
+}
+
+function validMeetingView(view) {
+  return view === "live" || view === "summary" || view === "closing";
+}
+
+function setMeetingView(view, options = {}) {
+  if (!validMeetingView(view)) view = "live";
+  currentMeetingView = view;
+  if (options.persist !== false) {
+    localStorage.setItem("meetingView", currentMeetingView);
+  }
+  applyMeetingView();
+}
+
+function applyMeetingView() {
+  if (!validMeetingView(currentMeetingView)) currentMeetingView = "live";
+  document.body.dataset.meetingView = currentMeetingView;
+  const hint = document.getElementById("meetingViewHint");
+  const hints = {
+    live: "默认展示实时转写和会议摘要，适合会议进行中观看。",
+    summary: "展示待办、决策、风险和待确认问题，适合需要核对结构化结果时使用。",
+    closing: "展示会议收尾内容，并提供二维码弹窗入口。"
+  };
+  if (hint) hint.textContent = hints[currentMeetingView] || hints.live;
+  document.querySelectorAll("#meetingViewButtons button").forEach(button => {
+    button.classList.toggle("active", button.dataset.value === currentMeetingView);
+  });
+}
+
+function syncMeetingViewForStatus(status) {
+  if (pageMode !== "meeting") return;
+  if (status === "ended") {
+    if (currentMeetingView !== "closing") setMeetingView("closing", { persist: false });
+    return;
+  }
+  if (currentMeetingView === "closing") {
+    setMeetingView("live", { persist: false });
   }
 }
 
@@ -1045,7 +1321,11 @@ function renderState(update) {
   document.getElementById("statusText").textContent = status;
   currentMeetingId = nextMeetingId;
   document.getElementById("meetingId").textContent = currentMeetingId || "none";
+  const meeting = update.meeting || {};
+  document.getElementById("meetingTitle").textContent = meeting.title || "未命名会议";
+  document.getElementById("meetingType").textContent = meeting.meetingType || meeting.type || "unknown";
   document.getElementById("duration").textContent = (update.durationSeconds || 0) + "s";
+  syncMeetingViewForStatus(status);
   renderSharePanel(status);
   if (currentMeetingId) refreshLists();
 }
@@ -1054,21 +1334,47 @@ function renderSharePanel(status) {
   const panel = document.getElementById("sharePanel");
   const qr = document.getElementById("shareQR");
   const link = document.getElementById("shareLink");
+  const badge = document.getElementById("shareReadyBadge");
   if (!panel || !qr || !link) return;
   if (status !== "ended" || !currentMeetingId) {
-    panel.className = "panel share-panel";
+    closeShareModal();
     qr.removeAttribute("src");
     link.href = "#";
     link.textContent = "";
+    if (badge) badge.textContent = "未结束";
     return;
   }
   const sharePath = "/share/" + encodeURIComponent(currentMeetingId);
   const qrPath = "/api/meetings/" + encodeURIComponent(currentMeetingId) + "/share-qr.png?t=" + Date.now();
-  panel.className = "panel share-panel visible";
   qr.src = qrPath;
   link.href = sharePath;
   link.textContent = location.origin + sharePath;
+  if (badge) badge.textContent = "可扫码";
 }
+
+function openShareModal() {
+  if (!currentMeetingId) return;
+  if (currentStatus !== "ended") {
+    alert("会议结束后才能打开纪要二维码。");
+    return;
+  }
+  renderSharePanel("ended");
+  const panel = document.getElementById("sharePanel");
+  if (!panel) return;
+  panel.classList.add("visible");
+  panel.setAttribute("aria-hidden", "false");
+}
+
+function closeShareModal() {
+  const panel = document.getElementById("sharePanel");
+  if (!panel) return;
+  panel.classList.remove("visible");
+  panel.setAttribute("aria-hidden", "true");
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeShareModal();
+});
 
 function openSharePage() {
   if (!currentMeetingId) return;
@@ -1146,6 +1452,49 @@ async function addUtterance() {
   await handleResponse(res);
 }
 
+async function refreshAudioInputDevices() {
+  const select = document.getElementById("micDeviceSelect");
+  if (!select || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter(device => device.kind === "audioinput");
+    const previous = selectedAudioInputDeviceId;
+    select.innerHTML = '<option value="">浏览器默认输入</option>';
+    inputs.forEach((device, index) => {
+      const option = document.createElement("option");
+      option.value = device.deviceId;
+      option.textContent = device.label || ("麦克风 " + (index + 1));
+      select.appendChild(option);
+    });
+    const stillExists = inputs.some(device => device.deviceId === previous);
+    select.value = stillExists ? previous : "";
+    if (!stillExists && previous) {
+      selectedAudioInputDeviceId = "";
+      localStorage.removeItem("meetingAudioInputDeviceId");
+    }
+  } catch (err) {
+    console.warn("enumerate audio input devices failed", err);
+  }
+}
+
+function selectAudioInputDevice(deviceId) {
+  selectedAudioInputDeviceId = deviceId || "";
+  if (selectedAudioInputDeviceId) {
+    localStorage.setItem("meetingAudioInputDeviceId", selectedAudioInputDeviceId);
+  } else {
+    localStorage.removeItem("meetingAudioInputDeviceId");
+  }
+  if (browserAudioActive || audioWS) {
+    stopBrowserAudio();
+    setTimeout(() => {
+      startBrowserAudio().catch(err => {
+        console.error(err);
+        alert("切换麦克风失败，请重新选择输入设备或检查浏览器权限。");
+      });
+    }, 200);
+  }
+}
+
 async function startBrowserAudio() {
   if (!currentMeetingId) {
     alert("请先创建会议并开始会议");
@@ -1193,18 +1542,21 @@ async function startBrowserAudio() {
       }
     };
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        sampleRate: 16000,
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false
-      }
-    });
+    const audioConstraints = {
+      channelCount: 1,
+      sampleRate: 16000,
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false
+    };
+    if (selectedAudioInputDeviceId) {
+      audioConstraints.deviceId = { exact: selectedAudioInputDeviceId };
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
     browserMediaStream = stream;
     audioContext = new AudioContext({ sampleRate: 16000 });
     currentSampleRate = audioContext.sampleRate || 16000;
+    await refreshAudioInputDevices();
     micStream = audioContext.createMediaStreamSource(stream);
     processor = audioContext.createScriptProcessor(1024, 1, 1);
 
@@ -1212,8 +1564,9 @@ async function startBrowserAudio() {
       if (!browserAudioActive || !audioWS || audioWS.readyState !== WebSocket.OPEN) return;
       const input = e.inputBuffer.getChannelData(0);
       const localPeak = floatPeakToPCM(input);
+      latestClipRatio = floatClipRatio(input);
       const outputSampleCount = targetSampleCount(input.length, currentSampleRate, 16000);
-      updateLocalMicMetrics(localPeak);
+      updateLocalMicMetrics(localPeak, latestClipRatio);
       if (currentStatus === "soft_paused") {
         audioWS.send(new ArrayBuffer(outputSampleCount * 2));
         return;
@@ -1260,7 +1613,8 @@ function cleanupBrowserAudio(closeSocket) {
     browserMediaStream = null;
   }
   if (audioContext) { try { audioContext.close(); } catch(e) {} audioContext = null; }
-  updateLocalMicMetrics(0);
+  latestClipRatio = 0;
+  updateLocalMicMetrics(0, 0);
   updateServerMicMetrics(0, 0);
 }
 
@@ -1295,10 +1649,22 @@ function floatPeakToPCM(input) {
   return Math.round(Math.min(1, peak) * 32767);
 }
 
-function updateLocalMicMetrics(peak) {
+function floatClipRatio(input) {
+  if (!input || !input.length) return 0;
+  let clipped = 0;
+  for (let i = 0; i < input.length; i++) {
+    if (Math.abs(input[i]) >= 0.98) clipped++;
+  }
+  return clipped / input.length;
+}
+
+function updateLocalMicMetrics(peak, clipRatio) {
   const el = document.getElementById("localPeak");
   if (!el) return;
   el.textContent = String(peak);
+  latestClipRatio = Number.isFinite(clipRatio) ? clipRatio : 0;
+  const clipLabel = document.getElementById("clipRatioLabel");
+  if (clipLabel) clipLabel.textContent = Math.round(latestClipRatio * 100) + "%";
   setLevel("localLevel", peak);
   updateMicDiagnosis();
 }
@@ -1324,8 +1690,12 @@ function updateMicDiagnosis() {
   if (!box) return;
   const localPeak = Number(document.getElementById("localPeak").textContent || 0);
   const serverPeak = Number(document.getElementById("serverPeak").textContent || 0);
+  box.className = "mic-note";
   if (!browserAudioActive) {
     box.textContent = "等待麦克风连接。";
+  } else if (localPeak >= 32000 || serverPeak >= 32000 || latestClipRatio > 0.08) {
+    box.className = "mic-note warning";
+    box.textContent = "输入满幅削波：通常是浏览器选错输入设备、系统麦克风增益过高，或设备输出异常。请在上方切换真实麦克风，避开 monitor/数字输入/线路输入，并降低系统输入音量。";
   } else if (localPeak < 100) {
     box.textContent = "本地输入很低：优先检查系统麦克风、浏览器权限、输入设备或麦克风音量。";
   } else if (serverPeak < 100) {
@@ -1476,16 +1846,24 @@ function renderIntelligence(snapshot) {
   const summaryBox = document.getElementById("summaryBox");
   const decisionsList = document.getElementById("decisionsList");
   const actionItemsList = document.getElementById("actionItemsList");
+  const risksList = document.getElementById("risksList");
+  const openQuestionsList = document.getElementById("openQuestionsList");
   const raw = document.getElementById("intelligenceRaw");
-  if (!summaryBox || !decisionsList || !actionItemsList || !raw) return;
+  if (!summaryBox || !decisionsList || !actionItemsList || !risksList || !openQuestionsList || !raw) return;
 
   const decisions = snapshot && Array.isArray(snapshot.decisions) ? snapshot.decisions : [];
   const actions = snapshot && Array.isArray(snapshot.actionItems) ? snapshot.actionItems : [];
+  const risks = snapshot && Array.isArray(snapshot.risks) ? snapshot.risks : [];
+  const questions = snapshot && Array.isArray(snapshot.openQuestions) ? snapshot.openQuestions : [];
   const summary = snapshot && snapshot.summary ? snapshot.summary.content : "";
+  if (snapshot && snapshot.title) document.getElementById("meetingTitle").textContent = snapshot.title;
+  if (snapshot && snapshot.meetingType) document.getElementById("meetingType").textContent = snapshot.meetingType;
 
   document.getElementById("summaryCount").textContent = snapshot && snapshot.summary ? "1" : "0";
   document.getElementById("decisionCount").textContent = decisions.length;
   document.getElementById("actionCount").textContent = actions.length;
+  document.getElementById("riskCount").textContent = risks.length;
+  document.getElementById("questionCount").textContent = questions.length;
 
   summaryBox.textContent = summary || "暂无摘要";
   summaryBox.className = summary ? "summary-text" : "summary-text placeholder";
@@ -1510,6 +1888,7 @@ function renderIntelligence(snapshot) {
       item.task || "",
       item.owner || "",
       item.dueDate || "",
+      (item.missingFields || []).join(","),
       normalizeItemStatus(item.status || "open")
     ].join("|"),
     html: (item, index) => {
@@ -1519,7 +1898,59 @@ function renderIntelligence(snapshot) {
       return '<span class="item-index">' + (index + 1) + '</span>' +
         '<span class="item-title">' + escapeHtml(item.task || "") + '</span>' +
         '<span class="item-status ' + escapeHtml(status) + '">' + escapeHtml(status) + '</span>' +
-        '<div class="item-meta">' + escapeHtml(owner + " / " + due) + '</div>';
+        '<div class="item-meta">' + escapeHtml(owner + " / " + due) + '</div>' +
+        renderMissingTags(item.missingFields);
+    }
+  });
+  renderAnimatedList(risksList, risks, {
+    kind: "risks",
+    emptyText: "暂无风险与阻塞",
+    key: item => item.id || item.content,
+    className: () => "",
+    signature: item => [
+      item.content || "",
+      item.impact || "",
+      item.level || "",
+      item.owner || "",
+      item.mitigation || "",
+      item.dueDate || "",
+      item.status || "",
+      (item.missingFields || []).join(",")
+    ].join("|"),
+    html: (item, index) => {
+      const level = item.level || "medium";
+      const owner = item.owner || "负责人待定";
+      const due = item.dueDate || "时间待定";
+      const mitigation = item.mitigation || "处理方案待定";
+      return '<span class="item-index">' + (index + 1) + '</span>' +
+        '<span class="item-content">' + escapeHtml(item.content || "") + '</span>' +
+        '<span class="level-tag ' + escapeHtml(level) + '">' + escapeHtml(level) + '</span>' +
+        '<div class="item-meta">' + escapeHtml(owner + " / " + due + " / " + mitigation) + '</div>' +
+        (item.impact ? '<div class="item-meta">影响：' + escapeHtml(item.impact) + '</div>' : '') +
+        renderMissingTags(item.missingFields);
+    }
+  });
+  renderAnimatedList(openQuestionsList, questions, {
+    kind: "open_questions",
+    emptyText: "暂无待确认问题",
+    key: item => item.id || item.question,
+    className: () => "",
+    signature: item => [
+      item.question || "",
+      item.owner || "",
+      item.dueDate || "",
+      item.status || "",
+      (item.missingFields || []).join(",")
+    ].join("|"),
+    html: (item, index) => {
+      const owner = item.owner || "跟进人待定";
+      const due = item.dueDate || "确认时间待定";
+      const status = normalizeItemStatus(item.status || "open");
+      return '<span class="item-index">' + (index + 1) + '</span>' +
+        '<span class="item-content">' + escapeHtml(item.question || "") + '</span>' +
+        '<span class="item-status ' + escapeHtml(status) + '">' + escapeHtml(status) + '</span>' +
+        '<div class="item-meta">' + escapeHtml(owner + " / " + due) + '</div>' +
+        renderMissingTags(item.missingFields);
     }
   });
   raw.textContent = JSON.stringify(snapshot || null, null, 2);
@@ -1868,6 +2299,22 @@ function listContentSignature(item, index, options) {
   return String(options.html(item, index) || "");
 }
 
+function renderMissingTags(fields) {
+  if (!Array.isArray(fields) || !fields.length) return "";
+  return '<div class="missing-tags">' + fields.map(field =>
+    '<span class="missing-tag">缺' + escapeHtml(missingFieldLabel(field)) + '</span>'
+  ).join("") + '</div>';
+}
+
+function missingFieldLabel(field) {
+  switch (field) {
+    case "owner": return "负责人";
+    case "due_date": return "截止时间";
+    case "mitigation": return "处理方案";
+    default: return field || "信息";
+  }
+}
+
 function buildListMutation(event) {
   if (!event || event.executionStatus !== "success") return null;
   return {
@@ -2084,6 +2531,10 @@ function connectWS() {
   ws.onclose = () => setTimeout(connectWS, 1000);
 }
 
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+  navigator.mediaDevices.addEventListener("devicechange", refreshAudioInputDevices);
+}
+refreshAudioInputDevices();
 refreshAll();
 connectWS();
 </script>

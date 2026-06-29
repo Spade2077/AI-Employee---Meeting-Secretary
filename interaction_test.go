@@ -296,6 +296,66 @@ func TestInteractionCommandExecutionCoversSupportedIntents(t *testing.T) {
 	}
 }
 
+func TestInteractionUpdateMeetingTitleAndUndo(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	_, message, err := server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "update_meeting_title",
+		TargetType: "meeting",
+		Title:      "展会演示准备会",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(message, "展会演示准备会") {
+		t.Fatalf("expected title update message, got %q", message)
+	}
+	meeting, err := store.GetMeeting(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meeting.Title != "展会演示准备会" || !meeting.TitleLocked {
+		t.Fatalf("expected updated locked title, got %#v", meeting)
+	}
+
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "undo_last_interaction",
+		TargetType: "interaction",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meeting, err = store.GetMeeting(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meeting.Title != "interaction" || meeting.TitleLocked {
+		t.Fatalf("expected title undo to restore original title and lock state, got %#v", meeting)
+	}
+}
+
+func TestParseMeetingTitleLocally(t *testing.T) {
+	command, ok := parseMeetingTitleLocally("把会议标题改成展会演示准备会")
+	if !ok {
+		t.Fatal("expected local meeting title parser to match")
+	}
+	command = normalizeInteractionCommand(command)
+	if command.Intent != "update_meeting_title" || command.TargetType != "meeting" || command.Title != "展会演示准备会" {
+		t.Fatalf("unexpected parsed title command: %#v", command)
+	}
+
+	command, ok = parseMeetingTitleLocally("设置标题为客户试点复盘会，谢谢")
+	if !ok {
+		t.Fatal("expected local meeting title parser to match polite suffix")
+	}
+	command = normalizeInteractionCommand(command)
+	if command.Title != "客户试点复盘会" {
+		t.Fatalf("expected polite suffix to be removed, got %#v", command)
+	}
+}
+
 func TestInteractionDecisionCommands(t *testing.T) {
 	ctx := context.Background()
 	store, meetingID := newInteractionStore(t, ctx)
@@ -407,6 +467,259 @@ func TestInteractionDecisionCommands(t *testing.T) {
 	}
 	if len(decisions) != 0 {
 		t.Fatalf("expected decision to be deleted, got %#v", decisions)
+	}
+}
+
+func TestInteractionRiskAndOpenQuestionCommands(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	_, _, err := server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:      "update_risk",
+		TargetType:  "risk",
+		TargetIndex: 1,
+		Owner:       "Li Na",
+		Mitigation:  "Prepare a backup microphone",
+		DueDate:     "Wednesday",
+		Level:       "high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	risks, err := store.ListRisks(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if risks[0].Owner != "Li Na" || risks[0].Mitigation != "Prepare a backup microphone" || risks[0].DueDate != "Wednesday" || risks[0].Level != "high" {
+		t.Fatalf("expected first risk to be updated, got %#v", risks[0])
+	}
+
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:      "close_risk",
+		TargetType:  "risk",
+		TargetIndex: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	risks, err = store.ListRisks(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if risks[0].Status != "completed" {
+		t.Fatalf("expected first risk completed, got %#v", risks[0])
+	}
+
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "create_risk",
+		TargetType: "risk",
+		Content:    "Battery overheating may affect long recording",
+		Owner:      "Chen Yu",
+		Mitigation: "Prepare a cooling stand",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	risks, err = store.ListRisks(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(risks) != 3 {
+		t.Fatalf("expected new risk, got %#v", risks)
+	}
+
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:        "merge_risks",
+		TargetType:    "risk",
+		SourceIndices: []int{2, 3},
+		Content:       "Venue network and battery risks need an onsite fallback plan",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	risks, err = store.ListRisks(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(risks) != 2 || !strings.Contains(risks[1].Content, "onsite fallback") {
+		t.Fatalf("expected merged risk, got %#v", risks)
+	}
+
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "undo_last_interaction",
+		TargetType: "interaction",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	risks, err = store.ListRisks(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(risks) != 3 {
+		t.Fatalf("expected risk merge undo to restore 3 risks, got %#v", risks)
+	}
+
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:      "update_open_question",
+		TargetType:  "open_question",
+		TargetIndex: 1,
+		Owner:       "Zhao Qiang",
+		DueDate:     "Wednesday",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	questions, err := store.ListOpenQuestions(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if questions[0].Owner != "Zhao Qiang" || questions[0].DueDate != "Wednesday" {
+		t.Fatalf("expected first open question to be updated, got %#v", questions[0])
+	}
+
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:      "close_open_question",
+		TargetType:  "open_question",
+		TargetIndex: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	questions, err = store.ListOpenQuestions(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if questions[0].Status != "completed" {
+		t.Fatalf("expected first open question completed, got %#v", questions[0])
+	}
+
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "create_open_question",
+		TargetType: "open_question",
+		Question:   "Whether the customer demo needs a guest network",
+		Owner:      "Wang Lei",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	questions, err = store.ListOpenQuestions(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(questions) != 3 {
+		t.Fatalf("expected new open question, got %#v", questions)
+	}
+
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:        "merge_open_questions",
+		TargetType:    "open_question",
+		SourceIndices: []int{2, 3},
+		Question:      "Confirm offline mode and guest network requirements",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	questions, err = store.ListOpenQuestions(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(questions) != 2 || !strings.Contains(questions[1].Question, "guest network") {
+		t.Fatalf("expected merged open question, got %#v", questions)
+	}
+
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "undo_last_interaction",
+		TargetType: "interaction",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	questions, err = store.ListOpenQuestions(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(questions) != 3 {
+		t.Fatalf("expected open question merge undo to restore 3 questions, got %#v", questions)
+	}
+}
+
+func TestToolExecutorRecordsJournalAndUndo(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+	executor := NewToolExecutor(NewMeetingToolRegistry(server), store)
+
+	readResult, err := executor.Execute(ctx, ToolExecutionInput{
+		MeetingID:          meetingID,
+		InteractionEventID: "ie_tool_read",
+		StepIndex:          1,
+		ToolName:           ToolMeetingGetSnapshot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !readResult.Success || readResult.Data == nil {
+		t.Fatalf("expected snapshot tool result, got %#v", readResult)
+	}
+
+	alertResult, err := executor.Execute(ctx, ToolExecutionInput{
+		MeetingID:          meetingID,
+		InteractionEventID: "ie_tool_read",
+		StepIndex:          2,
+		ToolName:           ToolMissingAlertList,
+		Args:               map[string]any{"target_type": "risk", "field": "mitigation"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts, ok := alertResult.Data.([]MissingFieldAlert)
+	if !ok || len(alerts) == 0 {
+		t.Fatalf("expected filtered missing alerts, got %#v", alertResult.Data)
+	}
+
+	_, err = executor.Execute(ctx, ToolExecutionInput{
+		MeetingID:          meetingID,
+		InteractionEventID: "ie_tool_write",
+		StepIndex:          1,
+		ToolName:           ToolRiskUpdate,
+		Args: map[string]any{
+			"target_index": 1,
+			"owner":        "Li Na",
+			"mitigation":   "Prepare a backup microphone",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := store.ListOperationJournalRecords(ctx, "ie_tool_write")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 operation journal record, got %#v", records)
+	}
+	if records[0].ToolName != string(ToolRiskUpdate) || records[0].Status != "success" {
+		t.Fatalf("unexpected operation journal record: %#v", records[0])
+	}
+	if records[0].BeforeJSON == "" || records[0].AfterJSON == "" || records[0].UndoJSON == "" {
+		t.Fatalf("expected journal to keep before/after/undo, got %#v", records[0])
+	}
+
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "undo_last_interaction",
+		TargetType: "interaction",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	risks, err := store.ListRisks(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if risks[0].Owner == "Li Na" || risks[0].Mitigation == "Prepare a backup microphone" {
+		t.Fatalf("expected tool undo to restore original risk, got %#v", risks[0])
 	}
 }
 
@@ -529,6 +842,14 @@ func newInteractionStore(t *testing.T, ctx context.Context) (*Store, string) {
 			{Task: "Prepare meeting materials", Owner: "Zhang San", Status: "open"},
 			{Task: "Book meeting room", Owner: "Li Si", Status: "open"},
 			{Task: "Investigate ASR connection keepalive", Owner: "Wang Wu", Status: "open"},
+		},
+		Risks: []RiskExtraction{
+			{Content: "Microphone stability may affect the demo", Impact: "Demo may be interrupted", Level: "medium", Status: "open"},
+			{Content: "Venue network may be unstable", Impact: "Remote access may fail", Level: "high", Status: "open"},
+		},
+		OpenQuestions: []OpenQuestionExtraction{
+			{Question: "Who owns the venue network check", Status: "open"},
+			{Question: "Whether offline mode is needed for the demo", Status: "open"},
 		},
 	}, 1)
 	if err != nil {

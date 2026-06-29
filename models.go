@@ -40,6 +40,9 @@ type Meeting struct {
 	ID              string `json:"id"`
 	Title           string `json:"title"`
 	Type            string `json:"type"`
+	MeetingType     string `json:"meetingType"`
+	TitleLocked     bool   `json:"titleLocked"`
+	TypeLocked      bool   `json:"typeLocked"`
 	Status          string `json:"status"`
 	PreviousStatus  string `json:"previousStatus,omitempty"`
 	StartedAt       string `json:"startedAt,omitempty"`
@@ -104,16 +107,17 @@ type MeetingDecision struct {
 }
 
 type MeetingActionItem struct {
-	ID         string `json:"id"`
-	MeetingID  string `json:"meetingId"`
-	Task       string `json:"task"`
-	Owner      string `json:"owner,omitempty"`
-	DueDate    string `json:"dueDate,omitempty"`
-	Status     string `json:"status"`
-	SourceText string `json:"sourceText,omitempty"`
-	IsDeleted  bool   `json:"isDeleted"`
-	CreatedAt  string `json:"createdAt"`
-	UpdatedAt  string `json:"updatedAt"`
+	ID            string   `json:"id"`
+	MeetingID     string   `json:"meetingId"`
+	Task          string   `json:"task"`
+	Owner         string   `json:"owner,omitempty"`
+	DueDate       string   `json:"dueDate,omitempty"`
+	Status        string   `json:"status"`
+	MissingFields []string `json:"missingFields,omitempty"`
+	SourceText    string   `json:"sourceText,omitempty"`
+	IsDeleted     bool     `json:"isDeleted"`
+	CreatedAt     string   `json:"createdAt"`
+	UpdatedAt     string   `json:"updatedAt"`
 }
 
 type ActionItemMutation struct {
@@ -122,6 +126,65 @@ type ActionItemMutation struct {
 	DueDate    string
 	Status     string
 	SourceText string
+}
+
+type MeetingRisk struct {
+	ID            string   `json:"id"`
+	MeetingID     string   `json:"meetingId"`
+	Content       string   `json:"content"`
+	Impact        string   `json:"impact,omitempty"`
+	Level         string   `json:"level"`
+	Owner         string   `json:"owner,omitempty"`
+	Mitigation    string   `json:"mitigation,omitempty"`
+	DueDate       string   `json:"dueDate,omitempty"`
+	Status        string   `json:"status"`
+	MissingFields []string `json:"missingFields,omitempty"`
+	SourceText    string   `json:"sourceText,omitempty"`
+	IsDeleted     bool     `json:"isDeleted"`
+	CreatedAt     string   `json:"createdAt"`
+	UpdatedAt     string   `json:"updatedAt"`
+}
+
+type RiskMutation struct {
+	Content    string
+	Impact     string
+	Level      string
+	Owner      string
+	Mitigation string
+	DueDate    string
+	Status     string
+	SourceText string
+}
+
+type MeetingOpenQuestion struct {
+	ID            string   `json:"id"`
+	MeetingID     string   `json:"meetingId"`
+	Question      string   `json:"question"`
+	Owner         string   `json:"owner,omitempty"`
+	DueDate       string   `json:"dueDate,omitempty"`
+	Status        string   `json:"status"`
+	MissingFields []string `json:"missingFields,omitempty"`
+	SourceText    string   `json:"sourceText,omitempty"`
+	IsDeleted     bool     `json:"isDeleted"`
+	CreatedAt     string   `json:"createdAt"`
+	UpdatedAt     string   `json:"updatedAt"`
+}
+
+type OpenQuestionMutation struct {
+	Question   string
+	Owner      string
+	DueDate    string
+	Status     string
+	SourceText string
+}
+
+type MissingFieldAlert struct {
+	TargetType  string `json:"targetType"`
+	TargetID    string `json:"targetId"`
+	TargetTitle string `json:"targetTitle"`
+	Field       string `json:"field"`
+	Message     string `json:"message"`
+	Level       string `json:"level"`
 }
 
 type InteractionCommand struct {
@@ -135,6 +198,11 @@ type InteractionCommand struct {
 	Owner         string   `json:"owner,omitempty"`
 	DueDate       string   `json:"due_date,omitempty"`
 	Status        string   `json:"status,omitempty"`
+	Impact        string   `json:"impact,omitempty"`
+	Level         string   `json:"level,omitempty"`
+	Mitigation    string   `json:"mitigation,omitempty"`
+	Question      string   `json:"question,omitempty"`
+	Title         string   `json:"title,omitempty"`
 	Content       string   `json:"content,omitempty"`
 	Confidence    float64  `json:"confidence"`
 	NeedConfirm   bool     `json:"need_confirm"`
@@ -187,6 +255,21 @@ type InteractionUndoRecord struct {
 	UsedByEventID      string `json:"usedByEventId,omitempty"`
 	CreatedAt          string `json:"createdAt"`
 	UsedAt             string `json:"usedAt,omitempty"`
+}
+
+type OperationJournalRecord struct {
+	ID                 string `json:"id"`
+	MeetingID          string `json:"meetingId"`
+	InteractionEventID string `json:"interactionEventId"`
+	StepIndex          int    `json:"stepIndex"`
+	ToolName           string `json:"toolName"`
+	ArgsJSON           string `json:"argsJson"`
+	BeforeJSON         string `json:"beforeJson"`
+	AfterJSON          string `json:"afterJson"`
+	UndoJSON           string `json:"undoJson"`
+	Status             string `json:"status"`
+	ErrorMessage       string `json:"errorMessage,omitempty"`
+	CreatedAt          string `json:"createdAt"`
 }
 
 type InteractionUpdate struct {

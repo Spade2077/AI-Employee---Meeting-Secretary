@@ -79,7 +79,7 @@ func main() {
 	log.Printf("meeting core service listening on http://localhost%s", cfg.Addr)
 	log.Printf("sqlite database: %s", cfg.DB)
 	log.Printf("stt provider: %s", sttAdapter.Provider())
-	if err := http.ListenAndServe(cfg.Addr, logRequests(mux)); err != nil {
+	if err := http.ListenAndServe(cfg.Addr, withLocalDevCORS(logRequests(mux))); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }

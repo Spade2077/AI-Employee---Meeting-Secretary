@@ -13,6 +13,8 @@ data/
 # Build artifacts
 *.exe
 *.exe~
+meeting-web/dist/
+meeting-web/node_modules/
 
 # Local build cache
 .cache/

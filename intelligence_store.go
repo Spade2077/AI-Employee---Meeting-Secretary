@@ -21,13 +21,31 @@ func (s *Store) GetIntelligenceSnapshot(ctx context.Context, meetingID string) (
 	if err != nil {
 		return nil, err
 	}
+	risks, err := s.ListRisks(ctx, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	openQuestions, err := s.ListOpenQuestions(ctx, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	meeting, err := s.GetMeeting(ctx, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	missingAlerts := computeMissingFieldAlerts(actionItems, risks, openQuestions)
 	return &IntelligenceSnapshot{
-		Type:        "intelligence_update",
-		MeetingID:   meetingID,
-		Summary:     summary,
-		Decisions:   decisions,
-		ActionItems: actionItems,
-		Timestamp:   nowString(),
+		Type:               "intelligence_update",
+		MeetingID:          meetingID,
+		Title:              meeting.Title,
+		MeetingType:        meeting.MeetingType,
+		Summary:            summary,
+		Decisions:          decisions,
+		ActionItems:        actionItems,
+		Risks:              risks,
+		OpenQuestions:      openQuestions,
+		MissingFieldAlerts: missingAlerts,
+		Timestamp:          nowString(),
 	}, nil
 }
 
@@ -35,8 +53,8 @@ func (s *Store) SaveIntelligenceExtraction(ctx context.Context, meetingID string
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Summary is a rolling snapshot, while decisions and action items are stable
-	// lists. This is why summary is overwritten but structured items are merged.
+	// 摘要和会议信息是滚动快照；决策、待办、风险和待确认问题是稳定列表，
+	// 入库时必须合并相似项，避免 LLM 每轮结构化都新增重复数据。
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -44,6 +62,9 @@ func (s *Store) SaveIntelligenceExtraction(ctx context.Context, meetingID string
 	defer tx.Rollback()
 
 	now := nowString()
+	if err := saveMeetingMetaExtractionTx(ctx, tx, meetingID, result.Title, result.MeetingType, now); err != nil {
+		return nil, err
+	}
 	if err := saveSummaryExtractionTx(ctx, tx, meetingID, result.Summary, sourceUtteranceCount, now); err != nil {
 		return nil, err
 	}
@@ -69,6 +90,30 @@ func (s *Store) SaveIntelligenceExtraction(ctx context.Context, meetingID string
 		return nil, err
 	}
 	if err := saveActionItemExtractionsTx(ctx, tx, meetingID, existingActionItems, result.ActionItems, now); err != nil {
+		return nil, err
+	}
+
+	existingRisks, err := risksTx(ctx, tx, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	existingRisks, err = mergeExistingRisksTx(ctx, tx, existingRisks, now)
+	if err != nil {
+		return nil, err
+	}
+	if err := saveRiskExtractionsTx(ctx, tx, meetingID, existingRisks, result.Risks, now); err != nil {
+		return nil, err
+	}
+
+	existingQuestions, err := openQuestionsTx(ctx, tx, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	existingQuestions, err = mergeExistingOpenQuestionsTx(ctx, tx, existingQuestions, now)
+	if err != nil {
+		return nil, err
+	}
+	if err := saveOpenQuestionExtractionsTx(ctx, tx, meetingID, existingQuestions, result.OpenQuestions, now); err != nil {
 		return nil, err
 	}
 
@@ -103,6 +148,20 @@ func (s *Store) CleanupIntelligenceDuplicates(ctx context.Context, meetingID str
 	if _, err := mergeExistingActionItemsTx(ctx, tx, actionItems, now); err != nil {
 		return err
 	}
+	risks, err := risksTx(ctx, tx, meetingID)
+	if err != nil {
+		return err
+	}
+	if _, err := mergeExistingRisksTx(ctx, tx, risks, now); err != nil {
+		return err
+	}
+	openQuestions, err := openQuestionsTx(ctx, tx, meetingID)
+	if err != nil {
+		return err
+	}
+	if _, err := mergeExistingOpenQuestionsTx(ctx, tx, openQuestions, now); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -128,6 +187,32 @@ func saveSummaryExtractionTx(ctx context.Context, tx *sql.Tx, meetingID, summary
 		content = ?, source_utterance_count = ?, updated_at = ?
 		WHERE meeting_id = ?`,
 		summary, sourceUtteranceCount, now, meetingID)
+	return err
+}
+
+func saveMeetingMetaExtractionTx(ctx context.Context, tx *sql.Tx, meetingID, title, meetingType, now string) error {
+	title = normalizeMeetingTitleInput(title)
+	meetingType = normalizeMeetingType(meetingType)
+	if title == "" && meetingType == "unknown" {
+		return nil
+	}
+	meeting, err := getMeetingTx(ctx, tx, meetingID)
+	if err != nil {
+		return err
+	}
+	nextTitle := meeting.Title
+	nextType := meeting.MeetingType
+	if title != "" && !meeting.TitleLocked && shouldUpdateMeetingTitle(meeting.Title, title) {
+		nextTitle = title
+	}
+	if meetingType != "unknown" && !meeting.TypeLocked {
+		nextType = meetingType
+	}
+	if nextTitle == meeting.Title && nextType == meeting.MeetingType {
+		return nil
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE meetings SET title = ?, type = ?, meeting_type = ?, updated_at = ? WHERE id = ?`,
+		nextTitle, nextType, nextType, now, meetingID)
 	return err
 }
 
@@ -189,13 +274,20 @@ func saveActionItemExtractionsTx(ctx context.Context, tx *sql.Tx, meetingID stri
 		if status == "" {
 			status = "open"
 		}
-		if index := matchingActionItemIndex(existingActionItems, task, owner, dueDate); index >= 0 {
+		sourceText := strings.TrimSpace(item.SourceText)
+		if index := matchingActionItemIndexWithSource(existingActionItems, task, owner, dueDate, sourceText); index >= 0 {
 			merged := existingActionItems[index]
 			updatedTask := richerText(merged.Task, task)
-			updatedOwner := preferFilledText(merged.Owner, owner)
-			updatedDueDate := preferFilledText(merged.DueDate, dueDate)
+			updatedOwner := preferRevisionText(merged.Owner, owner, sourceText)
+			updatedDueDate := preferRevisionText(merged.DueDate, dueDate, sourceText)
 			updatedStatus := preferFilledText(merged.Status, status)
-			updatedSource := richerText(merged.SourceText, strings.TrimSpace(item.SourceText))
+			updatedSource := mergeSourceText(merged.SourceText, sourceText)
+			updatedMissingFields := missingFieldsForActionItem(&MeetingActionItem{
+				Task:    updatedTask,
+				Owner:   updatedOwner,
+				DueDate: updatedDueDate,
+				Status:  updatedStatus,
+			})
 			if updatedTask == merged.Task &&
 				updatedOwner == merged.Owner &&
 				updatedDueDate == merged.DueDate &&
@@ -204,9 +296,10 @@ func saveActionItemExtractionsTx(ctx context.Context, tx *sql.Tx, meetingID stri
 				continue
 			}
 			_, err := tx.ExecContext(ctx, `UPDATE meeting_action_items SET
-				task = ?, owner = ?, due_date = ?, status = ?, source_text = ?, updated_at = ?
+				task = ?, owner = ?, due_date = ?, status = ?, missing_fields = ?, source_text = ?, updated_at = ?
 				WHERE id = ?`,
-				updatedTask, updatedOwner, updatedDueDate, updatedStatus, updatedSource, now, merged.ID)
+				updatedTask, updatedOwner, updatedDueDate, updatedStatus,
+				encodeStringList(updatedMissingFields), updatedSource, now, merged.ID)
 			if err != nil {
 				return err
 			}
@@ -214,29 +307,216 @@ func saveActionItemExtractionsTx(ctx context.Context, tx *sql.Tx, meetingID stri
 			merged.Owner = updatedOwner
 			merged.DueDate = updatedDueDate
 			merged.Status = updatedStatus
+			merged.MissingFields = updatedMissingFields
 			merged.SourceText = updatedSource
 			merged.UpdatedAt = now
 			existingActionItems[index] = merged
 			continue
 		}
 		actionItemID := newID("act")
+		missingFields := missingFieldsForActionItem(&MeetingActionItem{
+			Task:    task,
+			Owner:   owner,
+			DueDate: dueDate,
+			Status:  status,
+		})
 		_, err := tx.ExecContext(ctx, `INSERT INTO meeting_action_items
-			(id, meeting_id, task, owner, due_date, status, source_text, is_deleted, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-			actionItemID, meetingID, task, owner, dueDate, status, strings.TrimSpace(item.SourceText), now, now)
+			(id, meeting_id, task, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+			actionItemID, meetingID, task, owner, dueDate, status, encodeStringList(missingFields),
+			sourceText, now, now)
 		if err != nil {
 			return err
 		}
 		existingActionItems = append(existingActionItems, MeetingActionItem{
-			ID:         actionItemID,
-			MeetingID:  meetingID,
-			Task:       task,
+			ID:            actionItemID,
+			MeetingID:     meetingID,
+			Task:          task,
+			Owner:         owner,
+			DueDate:       dueDate,
+			Status:        status,
+			MissingFields: missingFields,
+			SourceText:    sourceText,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		})
+	}
+	return nil
+}
+
+func saveRiskExtractionsTx(ctx context.Context, tx *sql.Tx, meetingID string, existingRisks []MeetingRisk, risks []RiskExtraction, now string) error {
+	for _, risk := range risks {
+		content := strings.TrimSpace(risk.Content)
+		if content == "" || normalizeForCompare(content) == "" {
+			continue
+		}
+		impact := strings.TrimSpace(risk.Impact)
+		level := normalizeRiskLevel(risk.Level)
+		owner := strings.TrimSpace(risk.Owner)
+		mitigation := strings.TrimSpace(risk.Mitigation)
+		dueDate := strings.TrimSpace(risk.DueDate)
+		status := normalizeStructuredStatus(risk.Status)
+		sourceText := strings.TrimSpace(risk.SourceText)
+		if index := matchingRiskIndex(existingRisks, content); index >= 0 {
+			merged := existingRisks[index]
+			updatedContent := richerText(merged.Content, content)
+			updatedImpact := richerText(merged.Impact, impact)
+			updatedLevel := preferRiskLevel(merged.Level, level)
+			updatedOwner := preferRevisionText(merged.Owner, owner, sourceText)
+			updatedMitigation := preferRevisionText(merged.Mitigation, mitigation, sourceText)
+			updatedDueDate := preferRevisionText(merged.DueDate, dueDate, sourceText)
+			updatedStatus := preferFilledText(merged.Status, status)
+			updatedSource := mergeSourceText(merged.SourceText, sourceText)
+			updatedMissing := missingFieldsForRisk(&MeetingRisk{
+				Content:    updatedContent,
+				Impact:     updatedImpact,
+				Level:      updatedLevel,
+				Owner:      updatedOwner,
+				Mitigation: updatedMitigation,
+				DueDate:    updatedDueDate,
+				Status:     updatedStatus,
+			})
+			if updatedContent == merged.Content &&
+				updatedImpact == merged.Impact &&
+				updatedLevel == merged.Level &&
+				updatedOwner == merged.Owner &&
+				updatedMitigation == merged.Mitigation &&
+				updatedDueDate == merged.DueDate &&
+				updatedStatus == merged.Status &&
+				updatedSource == merged.SourceText {
+				continue
+			}
+			_, err := tx.ExecContext(ctx, `UPDATE meeting_risks SET
+				content = ?, impact = ?, level = ?, owner = ?, mitigation = ?, due_date = ?, status = ?, missing_fields = ?, source_text = ?, updated_at = ?
+				WHERE id = ?`,
+				updatedContent, updatedImpact, updatedLevel, updatedOwner, updatedMitigation, updatedDueDate,
+				updatedStatus, encodeStringList(updatedMissing), updatedSource, now, merged.ID)
+			if err != nil {
+				return err
+			}
+			merged.Content = updatedContent
+			merged.Impact = updatedImpact
+			merged.Level = updatedLevel
+			merged.Owner = updatedOwner
+			merged.Mitigation = updatedMitigation
+			merged.DueDate = updatedDueDate
+			merged.Status = updatedStatus
+			merged.MissingFields = updatedMissing
+			merged.SourceText = updatedSource
+			merged.UpdatedAt = now
+			existingRisks[index] = merged
+			continue
+		}
+		riskID := newID("risk")
+		missingFields := missingFieldsForRisk(&MeetingRisk{
+			Content:    content,
+			Impact:     impact,
+			Level:      level,
 			Owner:      owner,
+			Mitigation: mitigation,
 			DueDate:    dueDate,
 			Status:     status,
-			SourceText: strings.TrimSpace(item.SourceText),
-			CreatedAt:  now,
-			UpdatedAt:  now,
+		})
+		_, err := tx.ExecContext(ctx, `INSERT INTO meeting_risks
+			(id, meeting_id, content, impact, level, owner, mitigation, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+			riskID, meetingID, content, impact, level, owner, mitigation, dueDate, status,
+			encodeStringList(missingFields), sourceText, now, now)
+		if err != nil {
+			return err
+		}
+		existingRisks = append(existingRisks, MeetingRisk{
+			ID:            riskID,
+			MeetingID:     meetingID,
+			Content:       content,
+			Impact:        impact,
+			Level:         level,
+			Owner:         owner,
+			Mitigation:    mitigation,
+			DueDate:       dueDate,
+			Status:        status,
+			MissingFields: missingFields,
+			SourceText:    sourceText,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		})
+	}
+	return nil
+}
+
+func saveOpenQuestionExtractionsTx(ctx context.Context, tx *sql.Tx, meetingID string, existingQuestions []MeetingOpenQuestion, questions []OpenQuestionExtraction, now string) error {
+	for _, question := range questions {
+		text := strings.TrimSpace(question.Question)
+		if text == "" || normalizeForCompare(text) == "" {
+			continue
+		}
+		owner := strings.TrimSpace(question.Owner)
+		dueDate := strings.TrimSpace(question.DueDate)
+		status := normalizeStructuredStatus(question.Status)
+		sourceText := strings.TrimSpace(question.SourceText)
+		if index := matchingOpenQuestionIndex(existingQuestions, text); index >= 0 {
+			merged := existingQuestions[index]
+			updatedQuestion := richerText(merged.Question, text)
+			updatedOwner := preferRevisionText(merged.Owner, owner, sourceText)
+			updatedDueDate := preferRevisionText(merged.DueDate, dueDate, sourceText)
+			updatedStatus := preferFilledText(merged.Status, status)
+			updatedSource := mergeSourceText(merged.SourceText, sourceText)
+			updatedMissing := missingFieldsForOpenQuestion(&MeetingOpenQuestion{
+				Question: updatedQuestion,
+				Owner:    updatedOwner,
+				DueDate:  updatedDueDate,
+				Status:   updatedStatus,
+			})
+			if updatedQuestion == merged.Question &&
+				updatedOwner == merged.Owner &&
+				updatedDueDate == merged.DueDate &&
+				updatedStatus == merged.Status &&
+				updatedSource == merged.SourceText {
+				continue
+			}
+			_, err := tx.ExecContext(ctx, `UPDATE meeting_open_questions SET
+				question = ?, owner = ?, due_date = ?, status = ?, missing_fields = ?, source_text = ?, updated_at = ?
+				WHERE id = ?`,
+				updatedQuestion, updatedOwner, updatedDueDate, updatedStatus, encodeStringList(updatedMissing),
+				updatedSource, now, merged.ID)
+			if err != nil {
+				return err
+			}
+			merged.Question = updatedQuestion
+			merged.Owner = updatedOwner
+			merged.DueDate = updatedDueDate
+			merged.Status = updatedStatus
+			merged.MissingFields = updatedMissing
+			merged.SourceText = updatedSource
+			merged.UpdatedAt = now
+			existingQuestions[index] = merged
+			continue
+		}
+		questionID := newID("q")
+		missingFields := missingFieldsForOpenQuestion(&MeetingOpenQuestion{
+			Question: text,
+			Owner:    owner,
+			DueDate:  dueDate,
+			Status:   status,
+		})
+		_, err := tx.ExecContext(ctx, `INSERT INTO meeting_open_questions
+			(id, meeting_id, question, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+			questionID, meetingID, text, owner, dueDate, status, encodeStringList(missingFields), sourceText, now, now)
+		if err != nil {
+			return err
+		}
+		existingQuestions = append(existingQuestions, MeetingOpenQuestion{
+			ID:            questionID,
+			MeetingID:     meetingID,
+			Question:      text,
+			Owner:         owner,
+			DueDate:       dueDate,
+			Status:        status,
+			MissingFields: missingFields,
+			SourceText:    sourceText,
+			CreatedAt:     now,
+			UpdatedAt:     now,
 		})
 	}
 	return nil

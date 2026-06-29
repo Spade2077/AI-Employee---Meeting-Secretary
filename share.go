@@ -94,6 +94,7 @@ func (s *Server) buildMeetingMinutes(ctx context.Context, meetingID string) (str
 
 	b.WriteString("## 基本信息\n\n")
 	writeMarkdownBullet(&b, "会议 ID", meeting.ID)
+	writeMarkdownBullet(&b, "会议类型", meeting.MeetingType)
 	writeMarkdownBullet(&b, "会议状态", meeting.Status)
 	writeMarkdownBullet(&b, "开始时间", formatMinutesTime(meeting.StartedAt))
 	writeMarkdownBullet(&b, "结束时间", formatMinutesTime(meeting.EndedAt))
@@ -122,14 +123,62 @@ func (s *Server) buildMeetingMinutes(ctx context.Context, meetingID string) (str
 	if len(snapshot.ActionItems) == 0 {
 		b.WriteString("暂无待办。\n\n")
 	} else {
-		b.WriteString("| 事项 | 负责人 | 截止时间 | 状态 |\n")
-		b.WriteString("|---|---|---|---|\n")
+		b.WriteString("| 事项 | 负责人 | 截止时间 | 状态 | 缺失项 |\n")
+		b.WriteString("|---|---|---|---|---|\n")
 		for _, item := range snapshot.ActionItems {
-			fmt.Fprintf(&b, "| %s | %s | %s | %s |\n",
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n",
 				markdownTableCell(item.Task),
 				markdownTableCell(defaultText(item.Owner, "待定")),
 				markdownTableCell(defaultText(item.DueDate, "待定")),
-				markdownTableCell(defaultText(item.Status, "open")))
+				markdownTableCell(defaultText(item.Status, "open")),
+				markdownTableCell(missingFieldLabelsText(item.MissingFields)))
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("## 风险与阻塞\n\n")
+	if len(snapshot.Risks) == 0 {
+		b.WriteString("暂无风险。\n\n")
+	} else {
+		b.WriteString("| 风险 | 影响 | 等级 | 负责人 | 处理方案 | 截止时间 | 状态 | 缺失项 |\n")
+		b.WriteString("|---|---|---|---|---|---|---|---|\n")
+		for _, risk := range snapshot.Risks {
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s |\n",
+				markdownTableCell(risk.Content),
+				markdownTableCell(defaultText(risk.Impact, "无")),
+				markdownTableCell(defaultText(risk.Level, "medium")),
+				markdownTableCell(defaultText(risk.Owner, "待定")),
+				markdownTableCell(defaultText(risk.Mitigation, "待定")),
+				markdownTableCell(defaultText(risk.DueDate, "待定")),
+				markdownTableCell(defaultText(risk.Status, "open")),
+				markdownTableCell(missingFieldLabelsText(risk.MissingFields)))
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("## 待确认问题\n\n")
+	if len(snapshot.OpenQuestions) == 0 {
+		b.WriteString("暂无待确认问题。\n\n")
+	} else {
+		b.WriteString("| 问题 | 跟进人 | 确认时间 | 状态 | 缺失项 |\n")
+		b.WriteString("|---|---|---|---|---|\n")
+		for _, question := range snapshot.OpenQuestions {
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n",
+				markdownTableCell(question.Question),
+				markdownTableCell(defaultText(question.Owner, "待定")),
+				markdownTableCell(defaultText(question.DueDate, "待定")),
+				markdownTableCell(defaultText(question.Status, "open")),
+				markdownTableCell(missingFieldLabelsText(question.MissingFields)))
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("## 缺失项提醒\n\n")
+	if len(snapshot.MissingFieldAlerts) == 0 {
+		b.WriteString("暂无缺失项。\n\n")
+	} else {
+		for _, alert := range snapshot.MissingFieldAlerts {
+			fmt.Fprintf(&b, "- %s\n", markdownLine(alert.Message))
 		}
 		b.WriteString("\n")
 	}
@@ -268,6 +317,17 @@ func defaultText(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func missingFieldLabelsText(fields []string) string {
+	if len(fields) == 0 {
+		return "无"
+	}
+	labels := make([]string, 0, len(fields))
+	for _, field := range fields {
+		labels = append(labels, missingFieldLabel(field))
+	}
+	return strings.Join(labels, "、")
 }
 
 func safeFilename(value string) string {

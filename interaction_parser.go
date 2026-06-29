@@ -27,6 +27,31 @@ func (s *Server) parseInteractionCommand(ctx context.Context, meetingID, instruc
 		bytes, _ := json.Marshal(command)
 		return command, string(bytes), nil
 	}
+	if command, ok := parseMeetingTitleLocally(instruction); ok {
+		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地会议标题指令")
+		command = normalizeInteractionCommand(command)
+		bytes, _ := json.Marshal(command)
+		return command, string(bytes), nil
+	}
+	if command, ok := parseEndMeetingLocally(instruction); ok {
+		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地结束会议确认指令")
+		command = normalizeInteractionCommand(command)
+		bytes, _ := json.Marshal(command)
+		return command, string(bytes), nil
+	}
+	if command, ok := parseShowShareQRLocally(instruction); ok {
+		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地二维码展示指令")
+		command = normalizeInteractionCommand(command)
+		bytes, _ := json.Marshal(command)
+		return command, string(bytes), nil
+	}
+
+	if command, ok := parseMeetingViewLocally(instruction); ok {
+		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地页面切换指令")
+		command = normalizeInteractionCommand(command)
+		bytes, _ := json.Marshal(command)
+		return command, string(bytes), nil
+	}
 
 	configStarted := time.Now()
 	cfg, err := s.store.GetLLMConfigFor(ctx, LLMUseCaseInteraction)
@@ -64,7 +89,16 @@ func normalizeInteractionCommand(command InteractionCommand) InteractionCommand 
 	command.Task = strings.TrimSpace(command.Task)
 	command.Owner = strings.TrimSpace(command.Owner)
 	command.DueDate = strings.TrimSpace(command.DueDate)
-	command.Status = normalizeActionItemStatus(command.Status)
+	if strings.TrimSpace(command.Status) != "" {
+		command.Status = normalizeActionItemStatus(command.Status)
+	}
+	command.Impact = strings.TrimSpace(command.Impact)
+	if strings.TrimSpace(command.Level) != "" {
+		command.Level = normalizeRiskLevel(command.Level)
+	}
+	command.Mitigation = strings.TrimSpace(command.Mitigation)
+	command.Question = strings.TrimSpace(command.Question)
+	command.Title = normalizeMeetingTitleInput(command.Title)
 	command.Content = strings.TrimSpace(command.Content)
 	command.Reply = strings.TrimSpace(command.Reply)
 	command.Reason = strings.TrimSpace(command.Reason)
@@ -73,6 +107,34 @@ func normalizeInteractionCommand(command InteractionCommand) InteractionCommand 
 	command.SourceIndices = positiveUniqueInts(command.SourceIndices)
 
 	switch command.Intent {
+	case "update_meeting_title":
+		if command.TargetType == "" {
+			command.TargetType = "meeting"
+		}
+		if command.Title == "" {
+			command.Title = normalizeMeetingTitleInput(command.Content)
+		}
+	case "switch_meeting_view":
+		if command.TargetType == "" {
+			command.TargetType = "meeting_view"
+		}
+		view := normalizeMeetingView(command.TargetID)
+		if view == "" {
+			view = normalizeMeetingView(command.Content)
+		}
+		command.TargetID = view
+		command.Content = view
+	case "show_share_qr":
+		if command.TargetType == "" {
+			command.TargetType = "share"
+		}
+		if command.TargetID == "" {
+			command.TargetID = "minutes_qr"
+		}
+	case "request_end_meeting":
+		if command.TargetType == "" {
+			command.TargetType = "meeting"
+		}
 	case "delete_action_item", "update_action_item", "create_action_item", "complete_action_item", "move_action_item_to_decision", "merge_action_items":
 		if command.TargetType == "" {
 			command.TargetType = "action_item"
@@ -119,6 +181,164 @@ func parseUndoLocally(instruction string) (InteractionCommand, bool) {
 		}
 	}
 	return InteractionCommand{}, false
+}
+
+func parseMeetingTitleLocally(instruction string) (InteractionCommand, bool) {
+	text := strings.TrimSpace(instruction)
+	if text == "" {
+		return InteractionCommand{}, false
+	}
+	key := normalizeForCompare(text)
+	if !strings.Contains(key, "标题") && !strings.Contains(key, "会议名") && !strings.Contains(key, "会议名称") {
+		return InteractionCommand{}, false
+	}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?:把)?(?:会议)?标题(?:改成|改为|设置为|设为|叫做|叫|定为)\s*(.+)$`),
+		regexp.MustCompile(`(?:设置|修改|更改)(?:会议)?标题(?:为|成)?\s*(.+)$`),
+		regexp.MustCompile(`(?:会议名|会议名称)(?:改成|改为|设置为|设为|叫做|叫|定为)\s*(.+)$`),
+	}
+	for _, pattern := range patterns {
+		matches := pattern.FindStringSubmatch(text)
+		if len(matches) < 2 {
+			continue
+		}
+		title := cleanupParsedMeetingTitle(matches[1])
+		if title == "" {
+			continue
+		}
+		return InteractionCommand{
+			Intent:      "update_meeting_title",
+			TargetType:  "meeting",
+			Title:       title,
+			Content:     title,
+			Confidence:  0.85,
+			NeedConfirm: false,
+			Reply:       "已识别为修改会议标题。",
+		}, true
+	}
+	return InteractionCommand{}, false
+}
+
+func cleanupParsedMeetingTitle(value string) string {
+	value = strings.TrimSpace(value)
+	stoppers := []string{"。", "，", ",", "；", ";", "谢谢", "就这样", "可以吗"}
+	for _, stopper := range stoppers {
+		if index := strings.Index(value, stopper); index >= 0 {
+			value = value[:index]
+		}
+	}
+	return normalizeMeetingTitleInput(value)
+}
+
+func parseEndMeetingLocally(instruction string) (InteractionCommand, bool) {
+	text := strings.TrimSpace(instruction)
+	if text == "" {
+		return InteractionCommand{}, false
+	}
+	key := strings.ToLower(text)
+	hasEnd := strings.Contains(key, "结束") ||
+		strings.Contains(key, "停止") ||
+		strings.Contains(key, "关闭会议") ||
+		strings.Contains(key, "关闭本次会议") ||
+		strings.Contains(key, "end")
+	hasMeeting := strings.Contains(key, "会议") ||
+		strings.Contains(key, "本次") ||
+		strings.Contains(key, "记录") ||
+		strings.Contains(key, "meeting")
+	if !hasEnd || !hasMeeting {
+		return InteractionCommand{}, false
+	}
+	return InteractionCommand{
+		Intent:      "request_end_meeting",
+		TargetType:  "meeting",
+		Confidence:  0.9,
+		NeedConfirm: false,
+		Reply:       "已收到结束会议请求，需要确认后才会结束。",
+	}, true
+}
+
+func parseShowShareQRLocally(instruction string) (InteractionCommand, bool) {
+	text := strings.TrimSpace(instruction)
+	if text == "" {
+		return InteractionCommand{}, false
+	}
+	key := strings.ToLower(text)
+	hasQR := strings.Contains(key, "二维码") ||
+		strings.Contains(key, "扫码") ||
+		strings.Contains(key, "qr") ||
+		strings.Contains(key, "下载纪要") ||
+		strings.Contains(key, "纪要下载")
+	hasVerb := strings.Contains(key, "展示") ||
+		strings.Contains(key, "显示") ||
+		strings.Contains(key, "打开") ||
+		strings.Contains(key, "给我看") ||
+		strings.Contains(key, "show")
+	if !hasQR || !hasVerb {
+		return InteractionCommand{}, false
+	}
+	return InteractionCommand{
+		Intent:      "show_share_qr",
+		TargetType:  "share",
+		TargetID:    "minutes_qr",
+		Confidence:  0.9,
+		NeedConfirm: false,
+		Reply:       "已收到展示会议纪要二维码请求。",
+	}, true
+}
+
+func parseMeetingViewLocally(instruction string) (InteractionCommand, bool) {
+	text := strings.TrimSpace(instruction)
+	if text == "" {
+		return InteractionCommand{}, false
+	}
+	lower := strings.ToLower(text)
+	hasViewVerb := strings.Contains(lower, "切换") ||
+		strings.Contains(lower, "打开") ||
+		strings.Contains(lower, "展示") ||
+		strings.Contains(lower, "显示") ||
+		strings.Contains(lower, "进入") ||
+		strings.Contains(lower, "回到") ||
+		strings.Contains(lower, "看一下") ||
+		strings.Contains(lower, "给我看") ||
+		strings.Contains(lower, "show") ||
+		strings.Contains(lower, "switch")
+	if !hasViewVerb {
+		return InteractionCommand{}, false
+	}
+	view := normalizeMeetingView(lower)
+	if view == "" {
+		return InteractionCommand{}, false
+	}
+	return InteractionCommand{
+		Intent:      "switch_meeting_view",
+		TargetType:  "meeting_view",
+		TargetID:    view,
+		Content:     view,
+		Confidence:  0.86,
+		NeedConfirm: false,
+		Reply:       "已识别为页面切换指令。",
+	}, true
+}
+
+func normalizeMeetingView(value string) string {
+	key := strings.ToLower(strings.TrimSpace(value))
+	switch {
+	case key == "live" || strings.Contains(key, "实时") || strings.Contains(key, "转写") || strings.Contains(key, "记录"):
+		return "live"
+	case key == "summary" || strings.Contains(key, "总结") || strings.Contains(key, "摘要") || strings.Contains(key, "待办") || strings.Contains(key, "决策") || strings.Contains(key, "风险") || strings.Contains(key, "确认"):
+		return "summary"
+	default:
+		return ""
+	}
+}
+
+func meetingViewLabel(view string) string {
+	switch normalizeMeetingView(view) {
+	case "live":
+		return "实时记录页"
+	default:
+		return "会议总结页"
+	}
 }
 
 func parseDeleteActionItemLocally(instruction string) (InteractionCommand, error) {

@@ -22,6 +22,9 @@ func (s *Store) Init(ctx context.Context) error {
 			id TEXT PRIMARY KEY,
 			title TEXT NOT NULL DEFAULT '',
 			type TEXT NOT NULL DEFAULT 'unknown',
+			meeting_type TEXT NOT NULL DEFAULT 'unknown',
+			title_locked INTEGER NOT NULL DEFAULT 0,
+			type_locked INTEGER NOT NULL DEFAULT 0,
 			status TEXT NOT NULL,
 			previous_status TEXT NOT NULL DEFAULT '',
 			started_at TEXT,
@@ -88,6 +91,38 @@ func (s *Store) Init(ctx context.Context) error {
 			owner TEXT NOT NULL DEFAULT '',
 			due_date TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT 'open',
+			missing_fields TEXT NOT NULL DEFAULT '',
+			source_text TEXT NOT NULL DEFAULT '',
+			is_deleted INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			FOREIGN KEY(meeting_id) REFERENCES meetings(id)
+		);`,
+		`CREATE TABLE IF NOT EXISTS meeting_risks (
+			id TEXT PRIMARY KEY,
+			meeting_id TEXT NOT NULL,
+			content TEXT NOT NULL,
+			impact TEXT NOT NULL DEFAULT '',
+			level TEXT NOT NULL DEFAULT 'medium',
+			owner TEXT NOT NULL DEFAULT '',
+			mitigation TEXT NOT NULL DEFAULT '',
+			due_date TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'open',
+			missing_fields TEXT NOT NULL DEFAULT '',
+			source_text TEXT NOT NULL DEFAULT '',
+			is_deleted INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			FOREIGN KEY(meeting_id) REFERENCES meetings(id)
+		);`,
+		`CREATE TABLE IF NOT EXISTS meeting_open_questions (
+			id TEXT PRIMARY KEY,
+			meeting_id TEXT NOT NULL,
+			question TEXT NOT NULL,
+			owner TEXT NOT NULL DEFAULT '',
+			due_date TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'open',
+			missing_fields TEXT NOT NULL DEFAULT '',
 			source_text TEXT NOT NULL DEFAULT '',
 			is_deleted INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL,
@@ -126,12 +161,31 @@ func (s *Store) Init(ctx context.Context) error {
 			used_at TEXT NOT NULL DEFAULT '',
 			FOREIGN KEY(meeting_id) REFERENCES meetings(id)
 		);`,
+		`CREATE TABLE IF NOT EXISTS operation_journal (
+			id TEXT PRIMARY KEY,
+			meeting_id TEXT NOT NULL,
+			interaction_event_id TEXT NOT NULL,
+			step_index INTEGER NOT NULL DEFAULT 0,
+			tool_name TEXT NOT NULL,
+			args_json TEXT NOT NULL DEFAULT '',
+			before_json TEXT NOT NULL DEFAULT '',
+			after_json TEXT NOT NULL DEFAULT '',
+			undo_json TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			error_message TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			FOREIGN KEY(meeting_id) REFERENCES meetings(id)
+		);`,
 		`CREATE INDEX IF NOT EXISTS idx_state_events_meeting_created ON state_events(meeting_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_utterances_meeting_created ON utterances(meeting_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_decisions_meeting_created ON meeting_decisions(meeting_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_action_items_meeting_created ON meeting_action_items(meeting_id, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_risks_meeting_created ON meeting_risks(meeting_id, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_open_questions_meeting_created ON meeting_open_questions(meeting_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_interaction_events_meeting_created ON interaction_events(meeting_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_interaction_undo_meeting_created ON interaction_undo_records(meeting_id, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_operation_journal_event_step ON operation_journal(interaction_event_id, step_index);`,
+		`CREATE INDEX IF NOT EXISTS idx_operation_journal_meeting_created ON operation_journal(meeting_id, created_at);`,
 	}
 	for _, stmt := range schema {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
@@ -145,6 +199,9 @@ func (s *Store) Init(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "utterances", "confidence", "REAL NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureMeetingIntelligenceColumns(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "llm_config", "thinking_mode", "TEXT NOT NULL DEFAULT 'default'"); err != nil {
@@ -161,6 +218,49 @@ func (s *Store) Init(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `UPDATE meetings SET status = ?, updated_at = ? WHERE status = 'hard_muted'`, StatusSoftPaused, nowString()); err != nil {
 		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE meetings SET meeting_type = type WHERE meeting_type = '' OR meeting_type = 'unknown'`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ensureMeetingIntelligenceColumns(ctx context.Context) error {
+	columns := []struct {
+		table      string
+		column     string
+		definition string
+	}{
+		{"meetings", "title", "TEXT NOT NULL DEFAULT ''"},
+		{"meetings", "meeting_type", "TEXT NOT NULL DEFAULT 'unknown'"},
+		{"meetings", "title_locked", "INTEGER NOT NULL DEFAULT 0"},
+		{"meetings", "type_locked", "INTEGER NOT NULL DEFAULT 0"},
+		{"meeting_action_items", "task", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_action_items", "owner", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_action_items", "due_date", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_action_items", "status", "TEXT NOT NULL DEFAULT 'open'"},
+		{"meeting_action_items", "missing_fields", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_action_items", "source_text", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_risks", "content", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_risks", "impact", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_risks", "level", "TEXT NOT NULL DEFAULT 'medium'"},
+		{"meeting_risks", "owner", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_risks", "mitigation", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_risks", "due_date", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_risks", "status", "TEXT NOT NULL DEFAULT 'open'"},
+		{"meeting_risks", "missing_fields", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_risks", "source_text", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_open_questions", "question", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_open_questions", "owner", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_open_questions", "due_date", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_open_questions", "status", "TEXT NOT NULL DEFAULT 'open'"},
+		{"meeting_open_questions", "missing_fields", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_open_questions", "source_text", "TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, item := range columns {
+		if err := s.ensureColumn(ctx, item.table, item.column, item.definition); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -282,6 +382,7 @@ func (s *Store) CreateMeeting(ctx context.Context, title, meetingType, operator 
 	if strings.TrimSpace(meetingType) == "" {
 		meetingType = "unknown"
 	}
+	meetingType = normalizeMeetingType(meetingType)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -291,9 +392,9 @@ func (s *Store) CreateMeeting(ctx context.Context, title, meetingType, operator 
 
 	meetingID := newID("m")
 	if _, err := tx.ExecContext(ctx, `INSERT INTO meetings
-		(id, title, type, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		meetingID, title, meetingType, StatusStandby, now, now); err != nil {
+		(id, title, type, meeting_type, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		meetingID, title, meetingType, meetingType, StatusStandby, now, now); err != nil {
 		return nil, nil, err
 	}
 
@@ -324,7 +425,7 @@ func (s *Store) CurrentMeeting(ctx context.Context) (*Meeting, error) {
 }
 
 func (s *Store) currentMeeting(ctx context.Context) (*Meeting, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, title, type, status, previous_status,
+	row := s.db.QueryRowContext(ctx, `SELECT id, title, type, meeting_type, title_locked, type_locked, status, previous_status,
 		COALESCE(started_at, ''), COALESCE(ended_at, ''), duration_seconds, created_at, updated_at
 		FROM meetings ORDER BY created_at DESC LIMIT 1`)
 	meeting, err := scanMeeting(row)
@@ -338,7 +439,34 @@ func (s *Store) currentMeeting(ctx context.Context) (*Meeting, error) {
 }
 
 func (s *Store) GetMeeting(ctx context.Context, meetingID string) (*Meeting, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, title, type, status, previous_status,
+	row := s.db.QueryRowContext(ctx, `SELECT id, title, type, meeting_type, title_locked, type_locked, status, previous_status,
+		COALESCE(started_at, ''), COALESCE(ended_at, ''), duration_seconds, created_at, updated_at
+		FROM meetings WHERE id = ?`, meetingID)
+	return scanMeeting(row)
+}
+
+func (s *Store) UpdateMeetingTitle(ctx context.Context, meetingID, title string, locked bool) (*Meeting, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	title = normalizeMeetingTitleInput(title)
+	if title == "" {
+		return nil, fmt.Errorf("meeting title is required")
+	}
+	lockedValue := 0
+	if locked {
+		lockedValue = 1
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE meetings SET title = ?, title_locked = ?, updated_at = ? WHERE id = ?`,
+		title, lockedValue, nowString(), meetingID)
+	if err != nil {
+		return nil, err
+	}
+	return s.getMeetingNoLock(ctx, meetingID)
+}
+
+func (s *Store) getMeetingNoLock(ctx context.Context, meetingID string) (*Meeting, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, title, type, meeting_type, title_locked, type_locked, status, previous_status,
 		COALESCE(started_at, ''), COALESCE(ended_at, ''), duration_seconds, created_at, updated_at
 		FROM meetings WHERE id = ?`, meetingID)
 	return scanMeeting(row)
@@ -348,10 +476,15 @@ func scanMeeting(scanner interface {
 	Scan(dest ...any) error
 }) (*Meeting, error) {
 	var m Meeting
-	if err := scanner.Scan(&m.ID, &m.Title, &m.Type, &m.Status, &m.PreviousStatus,
+	var titleLocked, typeLocked int
+	if err := scanner.Scan(&m.ID, &m.Title, &m.Type, &m.MeetingType, &titleLocked, &typeLocked, &m.Status, &m.PreviousStatus,
 		&m.StartedAt, &m.EndedAt, &m.DurationSeconds, &m.CreatedAt, &m.UpdatedAt); err != nil {
 		return nil, err
 	}
+	m.MeetingType = normalizeMeetingType(preferFilledText(m.MeetingType, m.Type))
+	m.Type = m.MeetingType
+	m.TitleLocked = titleLocked != 0
+	m.TypeLocked = typeLocked != 0
 	if m.EndedAt == "" && m.StartedAt != "" && (m.Status == string(StatusRecording) || m.Status == string(StatusSoftPaused)) {
 		if startedAt, err := time.Parse(time.RFC3339Nano, m.StartedAt); err == nil {
 			m.DurationSeconds = int64(time.Since(startedAt).Seconds())
@@ -459,7 +592,7 @@ func nextStatus(meeting *Meeting, eventType string) (MeetingStatus, string, erro
 }
 
 func getMeetingTx(ctx context.Context, tx *sql.Tx, meetingID string) (*Meeting, error) {
-	row := tx.QueryRowContext(ctx, `SELECT id, title, type, status, previous_status,
+	row := tx.QueryRowContext(ctx, `SELECT id, title, type, meeting_type, title_locked, type_locked, status, previous_status,
 		COALESCE(started_at, ''), COALESCE(ended_at, ''), duration_seconds, created_at, updated_at
 		FROM meetings WHERE id = ?`, meetingID)
 	return scanMeeting(row)
@@ -671,7 +804,7 @@ func (s *Store) ListDecisions(ctx context.Context, meetingID string) ([]MeetingD
 }
 
 func (s *Store) ListActionItems(ctx context.Context, meetingID string) ([]MeetingActionItem, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, meeting_id, task, owner, due_date, status, source_text, is_deleted, created_at, updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT id, meeting_id, task, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at
 		FROM meeting_action_items WHERE meeting_id = ? AND is_deleted = 0 ORDER BY created_at ASC`, meetingID)
 	if err != nil {
 		return nil, err
@@ -687,6 +820,44 @@ func (s *Store) ListActionItems(ctx context.Context, meetingID string) ([]Meetin
 		items = append(items, *item)
 	}
 	return items, rows.Err()
+}
+
+func (s *Store) ListRisks(ctx context.Context, meetingID string) ([]MeetingRisk, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, meeting_id, content, impact, level, owner, mitigation, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at
+		FROM meeting_risks WHERE meeting_id = ? AND is_deleted = 0 ORDER BY created_at ASC`, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var risks []MeetingRisk
+	for rows.Next() {
+		risk, err := scanRisk(rows)
+		if err != nil {
+			return nil, err
+		}
+		risks = append(risks, *risk)
+	}
+	return risks, rows.Err()
+}
+
+func (s *Store) ListOpenQuestions(ctx context.Context, meetingID string) ([]MeetingOpenQuestion, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, meeting_id, question, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at
+		FROM meeting_open_questions WHERE meeting_id = ? AND is_deleted = 0 ORDER BY created_at ASC`, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var questions []MeetingOpenQuestion
+	for rows.Next() {
+		question, err := scanOpenQuestion(rows)
+		if err != nil {
+			return nil, err
+		}
+		questions = append(questions, *question)
+	}
+	return questions, rows.Err()
 }
 
 func (s *Store) DeleteActionItem(ctx context.Context, meetingID, actionItemID string) (*MeetingActionItem, error) {
@@ -723,18 +894,21 @@ func (s *Store) RestoreActionItem(ctx context.Context, item MeetingActionItem) (
 	}
 	item.UpdatedAt = now
 	item.Status = normalizeActionItemStatus(item.Status)
+	item.MissingFields = missingFieldsForActionItem(&item)
 	_, err := s.db.ExecContext(ctx, `INSERT INTO meeting_action_items
-		(id, meeting_id, task, owner, due_date, status, source_text, is_deleted, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+		(id, meeting_id, task, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			task = excluded.task,
 			owner = excluded.owner,
 			due_date = excluded.due_date,
 			status = excluded.status,
+			missing_fields = excluded.missing_fields,
 			source_text = excluded.source_text,
 			is_deleted = 0,
 			updated_at = excluded.updated_at`,
-		item.ID, item.MeetingID, item.Task, item.Owner, item.DueDate, item.Status, item.SourceText, item.CreatedAt, item.UpdatedAt)
+		item.ID, item.MeetingID, item.Task, item.Owner, item.DueDate, item.Status,
+		encodeStringList(item.MissingFields), item.SourceText, item.CreatedAt, item.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -763,10 +937,12 @@ func (s *Store) CreateActionItem(ctx context.Context, meetingID string, mutation
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
+	item.MissingFields = missingFieldsForActionItem(item)
 	_, err := s.db.ExecContext(ctx, `INSERT INTO meeting_action_items
-		(id, meeting_id, task, owner, due_date, status, source_text, is_deleted, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-		item.ID, item.MeetingID, item.Task, item.Owner, item.DueDate, item.Status, item.SourceText, item.CreatedAt, item.UpdatedAt)
+		(id, meeting_id, task, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+		item.ID, item.MeetingID, item.Task, item.Owner, item.DueDate, item.Status,
+		encodeStringList(item.MissingFields), item.SourceText, item.CreatedAt, item.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -800,10 +976,12 @@ func (s *Store) UpdateActionItem(ctx context.Context, meetingID, actionItemID st
 		return nil, fmt.Errorf("action item task cannot be empty")
 	}
 	item.UpdatedAt = nowString()
+	item.MissingFields = missingFieldsForActionItem(item)
 	_, err = s.db.ExecContext(ctx, `UPDATE meeting_action_items SET
-		task = ?, owner = ?, due_date = ?, status = ?, source_text = ?, updated_at = ?
+		task = ?, owner = ?, due_date = ?, status = ?, missing_fields = ?, source_text = ?, updated_at = ?
 		WHERE meeting_id = ? AND id = ? AND is_deleted = 0`,
-		item.Task, item.Owner, item.DueDate, item.Status, item.SourceText, item.UpdatedAt, meetingID, actionItemID)
+		item.Task, item.Owner, item.DueDate, item.Status, encodeStringList(item.MissingFields),
+		item.SourceText, item.UpdatedAt, meetingID, actionItemID)
 	if err != nil {
 		return nil, err
 	}
@@ -1004,10 +1182,12 @@ func (s *Store) MoveDecisionToActionItem(ctx context.Context, meetingID, decisio
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
+	item.MissingFields = missingFieldsForActionItem(item)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO meeting_action_items
-		(id, meeting_id, task, owner, due_date, status, source_text, is_deleted, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-		item.ID, item.MeetingID, item.Task, item.Owner, item.DueDate, item.Status, item.SourceText, item.CreatedAt, item.UpdatedAt); err != nil {
+		(id, meeting_id, task, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+		item.ID, item.MeetingID, item.Task, item.Owner, item.DueDate, item.Status,
+		encodeStringList(item.MissingFields), item.SourceText, item.CreatedAt, item.UpdatedAt); err != nil {
 		return nil, nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE meeting_decisions SET is_deleted = 1, updated_at = ? WHERE meeting_id = ? AND id = ?`,
@@ -1133,10 +1313,12 @@ func (s *Store) MergeActionItems(ctx context.Context, meetingID string, actionIt
 	}
 	now := nowString()
 	merged.UpdatedAt = now
+	merged.MissingFields = missingFieldsForActionItem(&merged)
 	if _, err := tx.ExecContext(ctx, `UPDATE meeting_action_items SET
-		task = ?, owner = ?, due_date = ?, status = ?, source_text = ?, updated_at = ?
+		task = ?, owner = ?, due_date = ?, status = ?, missing_fields = ?, source_text = ?, updated_at = ?
 		WHERE meeting_id = ? AND id = ? AND is_deleted = 0`,
-		merged.Task, merged.Owner, merged.DueDate, merged.Status, merged.SourceText, merged.UpdatedAt, meetingID, merged.ID); err != nil {
+		merged.Task, merged.Owner, merged.DueDate, merged.Status, encodeStringList(merged.MissingFields),
+		merged.SourceText, merged.UpdatedAt, meetingID, merged.ID); err != nil {
 		return nil, nil, err
 	}
 	for _, item := range items[1:] {
@@ -1149,6 +1331,473 @@ func (s *Store) MergeActionItems(ctx context.Context, meetingID string, actionIt
 		return nil, nil, err
 	}
 	return &merged, items[1:], nil
+}
+
+func (s *Store) CreateRisk(ctx context.Context, meetingID string, mutation RiskMutation) (*MeetingRisk, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	content := strings.TrimSpace(mutation.Content)
+	if content == "" {
+		return nil, fmt.Errorf("risk content is required")
+	}
+	now := nowString()
+	risk := &MeetingRisk{
+		ID:         newID("risk"),
+		MeetingID:  meetingID,
+		Content:    content,
+		Impact:     strings.TrimSpace(mutation.Impact),
+		Level:      normalizeRiskLevel(mutation.Level),
+		Owner:      strings.TrimSpace(mutation.Owner),
+		Mitigation: strings.TrimSpace(mutation.Mitigation),
+		DueDate:    strings.TrimSpace(mutation.DueDate),
+		Status:     normalizeStructuredStatus(mutation.Status),
+		SourceText: strings.TrimSpace(mutation.SourceText),
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	risk.MissingFields = missingFieldsForRisk(risk)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO meeting_risks
+		(id, meeting_id, content, impact, level, owner, mitigation, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+		risk.ID, risk.MeetingID, risk.Content, risk.Impact, risk.Level, risk.Owner, risk.Mitigation,
+		risk.DueDate, risk.Status, encodeStringList(risk.MissingFields), risk.SourceText, risk.CreatedAt, risk.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return risk, nil
+}
+
+func (s *Store) UpdateRisk(ctx context.Context, meetingID, riskID string, mutation RiskMutation) (*MeetingRisk, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	risk, err := s.getRisk(ctx, meetingID, riskID)
+	if err != nil {
+		return nil, err
+	}
+	if value := strings.TrimSpace(mutation.Content); value != "" {
+		risk.Content = value
+	}
+	if value := strings.TrimSpace(mutation.Impact); value != "" {
+		risk.Impact = value
+	}
+	if value := strings.TrimSpace(mutation.Level); value != "" {
+		risk.Level = normalizeRiskLevel(value)
+	}
+	if value := strings.TrimSpace(mutation.Owner); value != "" {
+		risk.Owner = value
+	}
+	if value := strings.TrimSpace(mutation.Mitigation); value != "" {
+		risk.Mitigation = value
+	}
+	if value := strings.TrimSpace(mutation.DueDate); value != "" {
+		risk.DueDate = value
+	}
+	if value := strings.TrimSpace(mutation.Status); value != "" {
+		risk.Status = normalizeStructuredStatus(value)
+	}
+	if value := strings.TrimSpace(mutation.SourceText); value != "" {
+		risk.SourceText = richerText(risk.SourceText, value)
+	}
+	if strings.TrimSpace(risk.Content) == "" {
+		return nil, fmt.Errorf("risk content cannot be empty")
+	}
+	risk.UpdatedAt = nowString()
+	risk.MissingFields = missingFieldsForRisk(risk)
+	_, err = s.db.ExecContext(ctx, `UPDATE meeting_risks SET
+		content = ?, impact = ?, level = ?, owner = ?, mitigation = ?, due_date = ?, status = ?, missing_fields = ?, source_text = ?, updated_at = ?
+		WHERE meeting_id = ? AND id = ? AND is_deleted = 0`,
+		risk.Content, risk.Impact, risk.Level, risk.Owner, risk.Mitigation, risk.DueDate, risk.Status,
+		encodeStringList(risk.MissingFields), risk.SourceText, risk.UpdatedAt, meetingID, riskID)
+	if err != nil {
+		return nil, err
+	}
+	return risk, nil
+}
+
+func (s *Store) CloseRisk(ctx context.Context, meetingID, riskID string) (*MeetingRisk, error) {
+	return s.UpdateRisk(ctx, meetingID, riskID, RiskMutation{Status: "completed"})
+}
+
+func (s *Store) DeleteRisk(ctx context.Context, meetingID, riskID string) (*MeetingRisk, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	risk, err := s.getRisk(ctx, meetingID, riskID)
+	if err != nil {
+		return nil, err
+	}
+	now := nowString()
+	if _, err := s.db.ExecContext(ctx, `UPDATE meeting_risks SET is_deleted = 1, updated_at = ? WHERE meeting_id = ? AND id = ?`,
+		now, meetingID, riskID); err != nil {
+		return nil, err
+	}
+	risk.IsDeleted = true
+	risk.UpdatedAt = now
+	return risk, nil
+}
+
+func (s *Store) RestoreRisk(ctx context.Context, risk MeetingRisk) (*MeetingRisk, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if strings.TrimSpace(risk.ID) == "" || strings.TrimSpace(risk.MeetingID) == "" {
+		return nil, fmt.Errorf("risk id and meeting id are required")
+	}
+	if strings.TrimSpace(risk.Content) == "" {
+		return nil, fmt.Errorf("risk content is required")
+	}
+	now := nowString()
+	if risk.CreatedAt == "" {
+		risk.CreatedAt = now
+	}
+	risk.UpdatedAt = now
+	risk.Level = normalizeRiskLevel(risk.Level)
+	risk.Status = normalizeStructuredStatus(risk.Status)
+	risk.MissingFields = missingFieldsForRisk(&risk)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO meeting_risks
+		(id, meeting_id, content, impact, level, owner, mitigation, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			content = excluded.content,
+			impact = excluded.impact,
+			level = excluded.level,
+			owner = excluded.owner,
+			mitigation = excluded.mitigation,
+			due_date = excluded.due_date,
+			status = excluded.status,
+			missing_fields = excluded.missing_fields,
+			source_text = excluded.source_text,
+			is_deleted = 0,
+			updated_at = excluded.updated_at`,
+		risk.ID, risk.MeetingID, risk.Content, risk.Impact, risk.Level, risk.Owner, risk.Mitigation,
+		risk.DueDate, risk.Status, encodeStringList(risk.MissingFields), risk.SourceText, risk.CreatedAt, risk.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	risk.IsDeleted = false
+	return &risk, nil
+}
+
+func (s *Store) MergeRisks(ctx context.Context, meetingID string, riskIDs []string, mutation RiskMutation) (*MeetingRisk, []MeetingRisk, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	riskIDs = uniqueNonEmptyStrings(riskIDs)
+	if len(riskIDs) < 2 {
+		return nil, nil, fmt.Errorf("at least two risks are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+
+	risks := make([]MeetingRisk, 0, len(riskIDs))
+	for _, id := range riskIDs {
+		risk, err := getRiskTx(ctx, tx, meetingID, id)
+		if err != nil {
+			return nil, nil, err
+		}
+		risks = append(risks, *risk)
+	}
+	merged := risks[0]
+	if value := strings.TrimSpace(mutation.Content); value != "" {
+		merged.Content = value
+	} else {
+		values := make([]string, 0, len(risks))
+		for _, risk := range risks {
+			values = append(values, risk.Content)
+		}
+		merged.Content = mergeDistinctText(values...)
+	}
+	if value := strings.TrimSpace(mutation.Impact); value != "" {
+		merged.Impact = value
+	} else {
+		values := make([]string, 0, len(risks))
+		for _, risk := range risks {
+			values = append(values, risk.Impact)
+		}
+		merged.Impact = mergeDistinctText(values...)
+	}
+	if value := strings.TrimSpace(mutation.Level); value != "" {
+		merged.Level = normalizeRiskLevel(value)
+	} else {
+		for _, risk := range risks[1:] {
+			merged.Level = preferRiskLevel(merged.Level, risk.Level)
+		}
+	}
+	if value := strings.TrimSpace(mutation.Owner); value != "" {
+		merged.Owner = value
+	} else {
+		for _, risk := range risks[1:] {
+			merged.Owner = preferFilledText(merged.Owner, risk.Owner)
+		}
+	}
+	if value := strings.TrimSpace(mutation.Mitigation); value != "" {
+		merged.Mitigation = value
+	} else {
+		values := make([]string, 0, len(risks))
+		for _, risk := range risks {
+			values = append(values, risk.Mitigation)
+		}
+		merged.Mitigation = mergeDistinctText(values...)
+	}
+	if value := strings.TrimSpace(mutation.DueDate); value != "" {
+		merged.DueDate = value
+	} else {
+		for _, risk := range risks[1:] {
+			merged.DueDate = preferFilledText(merged.DueDate, risk.DueDate)
+		}
+	}
+	if value := strings.TrimSpace(mutation.Status); value != "" {
+		merged.Status = normalizeStructuredStatus(value)
+	} else {
+		merged.Status = normalizeStructuredStatus(merged.Status)
+	}
+	if value := strings.TrimSpace(mutation.SourceText); value != "" {
+		merged.SourceText = richerText(merged.SourceText, value)
+	}
+	for _, risk := range risks[1:] {
+		merged.SourceText = richerText(merged.SourceText, risk.SourceText)
+	}
+	if strings.TrimSpace(merged.Content) == "" {
+		return nil, nil, fmt.Errorf("merged risk content cannot be empty")
+	}
+	now := nowString()
+	merged.UpdatedAt = now
+	merged.MissingFields = missingFieldsForRisk(&merged)
+	if _, err := tx.ExecContext(ctx, `UPDATE meeting_risks SET
+		content = ?, impact = ?, level = ?, owner = ?, mitigation = ?, due_date = ?, status = ?, missing_fields = ?, source_text = ?, updated_at = ?
+		WHERE meeting_id = ? AND id = ? AND is_deleted = 0`,
+		merged.Content, merged.Impact, merged.Level, merged.Owner, merged.Mitigation, merged.DueDate,
+		merged.Status, encodeStringList(merged.MissingFields), merged.SourceText, merged.UpdatedAt, meetingID, merged.ID); err != nil {
+		return nil, nil, err
+	}
+	for _, risk := range risks[1:] {
+		if _, err := tx.ExecContext(ctx, `UPDATE meeting_risks SET is_deleted = 1, updated_at = ? WHERE meeting_id = ? AND id = ?`,
+			now, meetingID, risk.ID); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	return &merged, risks[1:], nil
+}
+
+func (s *Store) CreateOpenQuestion(ctx context.Context, meetingID string, mutation OpenQuestionMutation) (*MeetingOpenQuestion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	questionText := strings.TrimSpace(mutation.Question)
+	if questionText == "" {
+		return nil, fmt.Errorf("open question text is required")
+	}
+	now := nowString()
+	question := &MeetingOpenQuestion{
+		ID:         newID("q"),
+		MeetingID:  meetingID,
+		Question:   questionText,
+		Owner:      strings.TrimSpace(mutation.Owner),
+		DueDate:    strings.TrimSpace(mutation.DueDate),
+		Status:     normalizeStructuredStatus(mutation.Status),
+		SourceText: strings.TrimSpace(mutation.SourceText),
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	question.MissingFields = missingFieldsForOpenQuestion(question)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO meeting_open_questions
+		(id, meeting_id, question, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+		question.ID, question.MeetingID, question.Question, question.Owner, question.DueDate, question.Status,
+		encodeStringList(question.MissingFields), question.SourceText, question.CreatedAt, question.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return question, nil
+}
+
+func (s *Store) UpdateOpenQuestion(ctx context.Context, meetingID, questionID string, mutation OpenQuestionMutation) (*MeetingOpenQuestion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	question, err := s.getOpenQuestion(ctx, meetingID, questionID)
+	if err != nil {
+		return nil, err
+	}
+	if value := strings.TrimSpace(mutation.Question); value != "" {
+		question.Question = value
+	}
+	if value := strings.TrimSpace(mutation.Owner); value != "" {
+		question.Owner = value
+	}
+	if value := strings.TrimSpace(mutation.DueDate); value != "" {
+		question.DueDate = value
+	}
+	if value := strings.TrimSpace(mutation.Status); value != "" {
+		question.Status = normalizeStructuredStatus(value)
+	}
+	if value := strings.TrimSpace(mutation.SourceText); value != "" {
+		question.SourceText = richerText(question.SourceText, value)
+	}
+	if strings.TrimSpace(question.Question) == "" {
+		return nil, fmt.Errorf("open question text cannot be empty")
+	}
+	question.UpdatedAt = nowString()
+	question.MissingFields = missingFieldsForOpenQuestion(question)
+	_, err = s.db.ExecContext(ctx, `UPDATE meeting_open_questions SET
+		question = ?, owner = ?, due_date = ?, status = ?, missing_fields = ?, source_text = ?, updated_at = ?
+		WHERE meeting_id = ? AND id = ? AND is_deleted = 0`,
+		question.Question, question.Owner, question.DueDate, question.Status, encodeStringList(question.MissingFields),
+		question.SourceText, question.UpdatedAt, meetingID, questionID)
+	if err != nil {
+		return nil, err
+	}
+	return question, nil
+}
+
+func (s *Store) CloseOpenQuestion(ctx context.Context, meetingID, questionID string) (*MeetingOpenQuestion, error) {
+	return s.UpdateOpenQuestion(ctx, meetingID, questionID, OpenQuestionMutation{Status: "completed"})
+}
+
+func (s *Store) DeleteOpenQuestion(ctx context.Context, meetingID, questionID string) (*MeetingOpenQuestion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	question, err := s.getOpenQuestion(ctx, meetingID, questionID)
+	if err != nil {
+		return nil, err
+	}
+	now := nowString()
+	if _, err := s.db.ExecContext(ctx, `UPDATE meeting_open_questions SET is_deleted = 1, updated_at = ? WHERE meeting_id = ? AND id = ?`,
+		now, meetingID, questionID); err != nil {
+		return nil, err
+	}
+	question.IsDeleted = true
+	question.UpdatedAt = now
+	return question, nil
+}
+
+func (s *Store) RestoreOpenQuestion(ctx context.Context, question MeetingOpenQuestion) (*MeetingOpenQuestion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if strings.TrimSpace(question.ID) == "" || strings.TrimSpace(question.MeetingID) == "" {
+		return nil, fmt.Errorf("open question id and meeting id are required")
+	}
+	if strings.TrimSpace(question.Question) == "" {
+		return nil, fmt.Errorf("open question text is required")
+	}
+	now := nowString()
+	if question.CreatedAt == "" {
+		question.CreatedAt = now
+	}
+	question.UpdatedAt = now
+	question.Status = normalizeStructuredStatus(question.Status)
+	question.MissingFields = missingFieldsForOpenQuestion(&question)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO meeting_open_questions
+		(id, meeting_id, question, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			question = excluded.question,
+			owner = excluded.owner,
+			due_date = excluded.due_date,
+			status = excluded.status,
+			missing_fields = excluded.missing_fields,
+			source_text = excluded.source_text,
+			is_deleted = 0,
+			updated_at = excluded.updated_at`,
+		question.ID, question.MeetingID, question.Question, question.Owner, question.DueDate, question.Status,
+		encodeStringList(question.MissingFields), question.SourceText, question.CreatedAt, question.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	question.IsDeleted = false
+	return &question, nil
+}
+
+func (s *Store) MergeOpenQuestions(ctx context.Context, meetingID string, questionIDs []string, mutation OpenQuestionMutation) (*MeetingOpenQuestion, []MeetingOpenQuestion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	questionIDs = uniqueNonEmptyStrings(questionIDs)
+	if len(questionIDs) < 2 {
+		return nil, nil, fmt.Errorf("at least two open questions are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+
+	questions := make([]MeetingOpenQuestion, 0, len(questionIDs))
+	for _, id := range questionIDs {
+		question, err := getOpenQuestionTx(ctx, tx, meetingID, id)
+		if err != nil {
+			return nil, nil, err
+		}
+		questions = append(questions, *question)
+	}
+	merged := questions[0]
+	if value := strings.TrimSpace(mutation.Question); value != "" {
+		merged.Question = value
+	} else {
+		values := make([]string, 0, len(questions))
+		for _, question := range questions {
+			values = append(values, question.Question)
+		}
+		merged.Question = mergeDistinctText(values...)
+	}
+	if value := strings.TrimSpace(mutation.Owner); value != "" {
+		merged.Owner = value
+	} else {
+		for _, question := range questions[1:] {
+			merged.Owner = preferFilledText(merged.Owner, question.Owner)
+		}
+	}
+	if value := strings.TrimSpace(mutation.DueDate); value != "" {
+		merged.DueDate = value
+	} else {
+		for _, question := range questions[1:] {
+			merged.DueDate = preferFilledText(merged.DueDate, question.DueDate)
+		}
+	}
+	if value := strings.TrimSpace(mutation.Status); value != "" {
+		merged.Status = normalizeStructuredStatus(value)
+	} else {
+		merged.Status = normalizeStructuredStatus(merged.Status)
+	}
+	if value := strings.TrimSpace(mutation.SourceText); value != "" {
+		merged.SourceText = richerText(merged.SourceText, value)
+	}
+	for _, question := range questions[1:] {
+		merged.SourceText = richerText(merged.SourceText, question.SourceText)
+	}
+	if strings.TrimSpace(merged.Question) == "" {
+		return nil, nil, fmt.Errorf("merged open question text cannot be empty")
+	}
+	now := nowString()
+	merged.UpdatedAt = now
+	merged.MissingFields = missingFieldsForOpenQuestion(&merged)
+	if _, err := tx.ExecContext(ctx, `UPDATE meeting_open_questions SET
+		question = ?, owner = ?, due_date = ?, status = ?, missing_fields = ?, source_text = ?, updated_at = ?
+		WHERE meeting_id = ? AND id = ? AND is_deleted = 0`,
+		merged.Question, merged.Owner, merged.DueDate, merged.Status, encodeStringList(merged.MissingFields),
+		merged.SourceText, merged.UpdatedAt, meetingID, merged.ID); err != nil {
+		return nil, nil, err
+	}
+	for _, question := range questions[1:] {
+		if _, err := tx.ExecContext(ctx, `UPDATE meeting_open_questions SET is_deleted = 1, updated_at = ? WHERE meeting_id = ? AND id = ?`,
+			now, meetingID, question.ID); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	return &merged, questions[1:], nil
 }
 
 func (s *Store) RewriteSummary(ctx context.Context, meetingID, content string) (*MeetingSummary, error) {
@@ -1192,7 +1841,7 @@ func (s *Store) RewriteSummary(ctx context.Context, meetingID, content string) (
 }
 
 func (s *Store) getActionItem(ctx context.Context, meetingID, actionItemID string) (*MeetingActionItem, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, meeting_id, task, owner, due_date, status, source_text, is_deleted, created_at, updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT id, meeting_id, task, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at
 		FROM meeting_action_items WHERE meeting_id = ? AND id = ? AND is_deleted = 0`, meetingID, actionItemID)
 	return scanActionItem(row)
 }
@@ -1203,8 +1852,20 @@ func (s *Store) getDecision(ctx context.Context, meetingID, decisionID string) (
 	return scanDecision(row)
 }
 
+func (s *Store) getRisk(ctx context.Context, meetingID, riskID string) (*MeetingRisk, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, meeting_id, content, impact, level, owner, mitigation, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at
+		FROM meeting_risks WHERE meeting_id = ? AND id = ? AND is_deleted = 0`, meetingID, riskID)
+	return scanRisk(row)
+}
+
+func (s *Store) getOpenQuestion(ctx context.Context, meetingID, questionID string) (*MeetingOpenQuestion, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, meeting_id, question, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at
+		FROM meeting_open_questions WHERE meeting_id = ? AND id = ? AND is_deleted = 0`, meetingID, questionID)
+	return scanOpenQuestion(row)
+}
+
 func getActionItemTx(ctx context.Context, tx *sql.Tx, meetingID, actionItemID string) (*MeetingActionItem, error) {
-	row := tx.QueryRowContext(ctx, `SELECT id, meeting_id, task, owner, due_date, status, source_text, is_deleted, created_at, updated_at
+	row := tx.QueryRowContext(ctx, `SELECT id, meeting_id, task, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at
 		FROM meeting_action_items WHERE meeting_id = ? AND id = ? AND is_deleted = 0`, meetingID, actionItemID)
 	return scanActionItem(row)
 }
@@ -1213,6 +1874,18 @@ func getDecisionTx(ctx context.Context, tx *sql.Tx, meetingID, decisionID string
 	row := tx.QueryRowContext(ctx, `SELECT id, meeting_id, content, source_text, is_deleted, created_at, updated_at
 		FROM meeting_decisions WHERE meeting_id = ? AND id = ? AND is_deleted = 0`, meetingID, decisionID)
 	return scanDecision(row)
+}
+
+func getRiskTx(ctx context.Context, tx *sql.Tx, meetingID, riskID string) (*MeetingRisk, error) {
+	row := tx.QueryRowContext(ctx, `SELECT id, meeting_id, content, impact, level, owner, mitigation, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at
+		FROM meeting_risks WHERE meeting_id = ? AND id = ? AND is_deleted = 0`, meetingID, riskID)
+	return scanRisk(row)
+}
+
+func getOpenQuestionTx(ctx context.Context, tx *sql.Tx, meetingID, questionID string) (*MeetingOpenQuestion, error) {
+	row := tx.QueryRowContext(ctx, `SELECT id, meeting_id, question, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at
+		FROM meeting_open_questions WHERE meeting_id = ? AND id = ? AND is_deleted = 0`, meetingID, questionID)
+	return scanOpenQuestion(row)
 }
 
 func normalizeActionItemStatus(value string) string {
@@ -1390,6 +2063,58 @@ func (s *Store) MarkUndoRecordUsed(ctx context.Context, undoID, usedByEventID st
 	return err
 }
 
+func (s *Store) SaveOperationJournalRecord(ctx context.Context, record OperationJournalRecord) (*OperationJournalRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if strings.TrimSpace(record.ID) == "" {
+		record.ID = newID("op")
+	}
+	if strings.TrimSpace(record.MeetingID) == "" {
+		return nil, fmt.Errorf("operation journal meeting id is required")
+	}
+	if strings.TrimSpace(record.ToolName) == "" {
+		return nil, fmt.Errorf("operation journal tool name is required")
+	}
+	if strings.TrimSpace(record.Status) == "" {
+		record.Status = "unknown"
+	}
+	if strings.TrimSpace(record.CreatedAt) == "" {
+		record.CreatedAt = nowString()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO operation_journal
+		(id, meeting_id, interaction_event_id, step_index, tool_name, args_json, before_json, after_json, undo_json, status, error_message, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		record.ID, record.MeetingID, record.InteractionEventID, record.StepIndex, record.ToolName,
+		record.ArgsJSON, record.BeforeJSON, record.AfterJSON, record.UndoJSON, record.Status, record.ErrorMessage, record.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+func (s *Store) ListOperationJournalRecords(ctx context.Context, interactionEventID string) ([]OperationJournalRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, meeting_id, interaction_event_id, step_index, tool_name,
+		args_json, before_json, after_json, undo_json, status, error_message, created_at
+		FROM operation_journal WHERE interaction_event_id = ? ORDER BY step_index ASC, created_at ASC`, interactionEventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	records := []OperationJournalRecord{}
+	for rows.Next() {
+		var record OperationJournalRecord
+		if err := rows.Scan(&record.ID, &record.MeetingID, &record.InteractionEventID, &record.StepIndex,
+			&record.ToolName, &record.ArgsJSON, &record.BeforeJSON, &record.AfterJSON, &record.UndoJSON,
+			&record.Status, &record.ErrorMessage, &record.CreatedAt); err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
 func scanDecision(scanner interface {
 	Scan(dest ...any) error
 }) (*MeetingDecision, error) {
@@ -1407,11 +2132,50 @@ func scanActionItem(scanner interface {
 }) (*MeetingActionItem, error) {
 	var item MeetingActionItem
 	var deleted int
-	if err := scanner.Scan(&item.ID, &item.MeetingID, &item.Task, &item.Owner, &item.DueDate, &item.Status, &item.SourceText, &deleted, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	var missingFieldsJSON string
+	if err := scanner.Scan(&item.ID, &item.MeetingID, &item.Task, &item.Owner, &item.DueDate,
+		&item.Status, &missingFieldsJSON, &item.SourceText, &deleted, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		return nil, err
 	}
 	item.IsDeleted = deleted != 0
+	item.Status = normalizeActionItemStatus(item.Status)
+	item.MissingFields = missingFieldsForActionItem(&item)
 	return &item, nil
+}
+
+func scanRisk(scanner interface {
+	Scan(dest ...any) error
+}) (*MeetingRisk, error) {
+	var risk MeetingRisk
+	var deleted int
+	var missingFieldsJSON string
+	if err := scanner.Scan(&risk.ID, &risk.MeetingID, &risk.Content, &risk.Impact, &risk.Level, &risk.Owner,
+		&risk.Mitigation, &risk.DueDate, &risk.Status, &missingFieldsJSON, &risk.SourceText, &deleted,
+		&risk.CreatedAt, &risk.UpdatedAt); err != nil {
+		return nil, err
+	}
+	risk.IsDeleted = deleted != 0
+	risk.Level = normalizeRiskLevel(risk.Level)
+	risk.Status = normalizeStructuredStatus(risk.Status)
+	risk.MissingFields = missingFieldsForRisk(&risk)
+	return &risk, nil
+}
+
+func scanOpenQuestion(scanner interface {
+	Scan(dest ...any) error
+}) (*MeetingOpenQuestion, error) {
+	var question MeetingOpenQuestion
+	var deleted int
+	var missingFieldsJSON string
+	if err := scanner.Scan(&question.ID, &question.MeetingID, &question.Question, &question.Owner,
+		&question.DueDate, &question.Status, &missingFieldsJSON, &question.SourceText, &deleted,
+		&question.CreatedAt, &question.UpdatedAt); err != nil {
+		return nil, err
+	}
+	question.IsDeleted = deleted != 0
+	question.Status = normalizeStructuredStatus(question.Status)
+	question.MissingFields = missingFieldsForOpenQuestion(&question)
+	return &question, nil
 }
 
 func scanInteractionEvent(scanner interface {
@@ -1489,7 +2253,7 @@ func decisionsTx(ctx context.Context, tx *sql.Tx, meetingID string) ([]MeetingDe
 }
 
 func actionItemsTx(ctx context.Context, tx *sql.Tx, meetingID string) ([]MeetingActionItem, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id, meeting_id, task, owner, due_date, status, source_text, is_deleted, created_at, updated_at
+	rows, err := tx.QueryContext(ctx, `SELECT id, meeting_id, task, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at
 		FROM meeting_action_items WHERE meeting_id = ? AND is_deleted = 0 ORDER BY created_at ASC`, meetingID)
 	if err != nil {
 		return nil, err
@@ -1505,6 +2269,44 @@ func actionItemsTx(ctx context.Context, tx *sql.Tx, meetingID string) ([]Meeting
 		items = append(items, *item)
 	}
 	return items, rows.Err()
+}
+
+func risksTx(ctx context.Context, tx *sql.Tx, meetingID string) ([]MeetingRisk, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id, meeting_id, content, impact, level, owner, mitigation, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at
+		FROM meeting_risks WHERE meeting_id = ? AND is_deleted = 0 ORDER BY created_at ASC`, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var risks []MeetingRisk
+	for rows.Next() {
+		risk, err := scanRisk(rows)
+		if err != nil {
+			return nil, err
+		}
+		risks = append(risks, *risk)
+	}
+	return risks, rows.Err()
+}
+
+func openQuestionsTx(ctx context.Context, tx *sql.Tx, meetingID string) ([]MeetingOpenQuestion, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id, meeting_id, question, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at
+		FROM meeting_open_questions WHERE meeting_id = ? AND is_deleted = 0 ORDER BY created_at ASC`, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var questions []MeetingOpenQuestion
+	for rows.Next() {
+		question, err := scanOpenQuestion(rows)
+		if err != nil {
+			return nil, err
+		}
+		questions = append(questions, *question)
+	}
+	return questions, rows.Err()
 }
 
 func mergeExistingDecisionsTx(ctx context.Context, tx *sql.Tx, decisions []MeetingDecision, now string) ([]MeetingDecision, error) {
@@ -1539,28 +2341,36 @@ func mergeExistingDecisionsTx(ctx context.Context, tx *sql.Tx, decisions []Meeti
 func mergeExistingActionItemsTx(ctx context.Context, tx *sql.Tx, items []MeetingActionItem, now string) ([]MeetingActionItem, error) {
 	merged := make([]MeetingActionItem, 0, len(items))
 	for _, item := range items {
-		if index := matchingActionItemIndex(merged, item.Task, item.Owner, item.DueDate); index >= 0 {
+		if index := matchingActionItemIndexWithSource(merged, item.Task, item.Owner, item.DueDate, item.SourceText); index >= 0 {
 			target := merged[index]
 			updatedTask := richerText(target.Task, item.Task)
-			updatedOwner := preferFilledText(target.Owner, item.Owner)
-			updatedDueDate := preferFilledText(target.DueDate, item.DueDate)
+			updatedOwner := preferRevisionText(target.Owner, item.Owner, item.SourceText)
+			updatedDueDate := preferRevisionText(target.DueDate, item.DueDate, item.SourceText)
 			updatedStatus := preferFilledText(target.Status, item.Status)
-			updatedSource := richerText(target.SourceText, item.SourceText)
+			updatedSource := mergeSourceText(target.SourceText, item.SourceText)
+			updatedMissingFields := missingFieldsForActionItem(&MeetingActionItem{
+				Task:    updatedTask,
+				Owner:   updatedOwner,
+				DueDate: updatedDueDate,
+				Status:  updatedStatus,
+			})
 			if updatedTask != target.Task ||
 				updatedOwner != target.Owner ||
 				updatedDueDate != target.DueDate ||
 				updatedStatus != target.Status ||
 				updatedSource != target.SourceText {
 				if _, err := tx.ExecContext(ctx, `UPDATE meeting_action_items SET
-					task = ?, owner = ?, due_date = ?, status = ?, source_text = ?, updated_at = ?
+					task = ?, owner = ?, due_date = ?, status = ?, missing_fields = ?, source_text = ?, updated_at = ?
 					WHERE id = ?`,
-					updatedTask, updatedOwner, updatedDueDate, updatedStatus, updatedSource, now, target.ID); err != nil {
+					updatedTask, updatedOwner, updatedDueDate, updatedStatus,
+					encodeStringList(updatedMissingFields), updatedSource, now, target.ID); err != nil {
 					return nil, err
 				}
 				target.Task = updatedTask
 				target.Owner = updatedOwner
 				target.DueDate = updatedDueDate
 				target.Status = updatedStatus
+				target.MissingFields = updatedMissingFields
 				target.SourceText = updatedSource
 				target.UpdatedAt = now
 				merged[index] = target
@@ -1571,6 +2381,112 @@ func mergeExistingActionItemsTx(ctx context.Context, tx *sql.Tx, items []Meeting
 			continue
 		}
 		merged = append(merged, item)
+	}
+	return merged, nil
+}
+
+func mergeExistingRisksTx(ctx context.Context, tx *sql.Tx, risks []MeetingRisk, now string) ([]MeetingRisk, error) {
+	merged := make([]MeetingRisk, 0, len(risks))
+	for _, risk := range risks {
+		if index := matchingRiskIndex(merged, risk.Content); index >= 0 {
+			target := merged[index]
+			updatedContent := richerText(target.Content, risk.Content)
+			updatedImpact := richerText(target.Impact, risk.Impact)
+			updatedLevel := preferRiskLevel(target.Level, risk.Level)
+			updatedOwner := preferRevisionText(target.Owner, risk.Owner, risk.SourceText)
+			updatedMitigation := preferRevisionText(target.Mitigation, risk.Mitigation, risk.SourceText)
+			updatedDueDate := preferRevisionText(target.DueDate, risk.DueDate, risk.SourceText)
+			updatedStatus := preferFilledText(target.Status, risk.Status)
+			updatedSource := mergeSourceText(target.SourceText, risk.SourceText)
+			updatedMissingFields := missingFieldsForRisk(&MeetingRisk{
+				Content:    updatedContent,
+				Impact:     updatedImpact,
+				Level:      updatedLevel,
+				Owner:      updatedOwner,
+				Mitigation: updatedMitigation,
+				DueDate:    updatedDueDate,
+				Status:     updatedStatus,
+			})
+			if updatedContent != target.Content ||
+				updatedImpact != target.Impact ||
+				updatedLevel != target.Level ||
+				updatedOwner != target.Owner ||
+				updatedMitigation != target.Mitigation ||
+				updatedDueDate != target.DueDate ||
+				updatedStatus != target.Status ||
+				updatedSource != target.SourceText {
+				if _, err := tx.ExecContext(ctx, `UPDATE meeting_risks SET
+					content = ?, impact = ?, level = ?, owner = ?, mitigation = ?, due_date = ?, status = ?, missing_fields = ?, source_text = ?, updated_at = ?
+					WHERE id = ?`,
+					updatedContent, updatedImpact, updatedLevel, updatedOwner, updatedMitigation, updatedDueDate,
+					updatedStatus, encodeStringList(updatedMissingFields), updatedSource, now, target.ID); err != nil {
+					return nil, err
+				}
+				target.Content = updatedContent
+				target.Impact = updatedImpact
+				target.Level = updatedLevel
+				target.Owner = updatedOwner
+				target.Mitigation = updatedMitigation
+				target.DueDate = updatedDueDate
+				target.Status = updatedStatus
+				target.MissingFields = updatedMissingFields
+				target.SourceText = updatedSource
+				target.UpdatedAt = now
+				merged[index] = target
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE meeting_risks SET is_deleted = 1, updated_at = ? WHERE id = ?`, now, risk.ID); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		merged = append(merged, risk)
+	}
+	return merged, nil
+}
+
+func mergeExistingOpenQuestionsTx(ctx context.Context, tx *sql.Tx, questions []MeetingOpenQuestion, now string) ([]MeetingOpenQuestion, error) {
+	merged := make([]MeetingOpenQuestion, 0, len(questions))
+	for _, question := range questions {
+		if index := matchingOpenQuestionIndex(merged, question.Question); index >= 0 {
+			target := merged[index]
+			updatedQuestion := richerText(target.Question, question.Question)
+			updatedOwner := preferRevisionText(target.Owner, question.Owner, question.SourceText)
+			updatedDueDate := preferRevisionText(target.DueDate, question.DueDate, question.SourceText)
+			updatedStatus := preferFilledText(target.Status, question.Status)
+			updatedSource := mergeSourceText(target.SourceText, question.SourceText)
+			updatedMissingFields := missingFieldsForOpenQuestion(&MeetingOpenQuestion{
+				Question: updatedQuestion,
+				Owner:    updatedOwner,
+				DueDate:  updatedDueDate,
+				Status:   updatedStatus,
+			})
+			if updatedQuestion != target.Question ||
+				updatedOwner != target.Owner ||
+				updatedDueDate != target.DueDate ||
+				updatedStatus != target.Status ||
+				updatedSource != target.SourceText {
+				if _, err := tx.ExecContext(ctx, `UPDATE meeting_open_questions SET
+					question = ?, owner = ?, due_date = ?, status = ?, missing_fields = ?, source_text = ?, updated_at = ?
+					WHERE id = ?`,
+					updatedQuestion, updatedOwner, updatedDueDate, updatedStatus,
+					encodeStringList(updatedMissingFields), updatedSource, now, target.ID); err != nil {
+					return nil, err
+				}
+				target.Question = updatedQuestion
+				target.Owner = updatedOwner
+				target.DueDate = updatedDueDate
+				target.Status = updatedStatus
+				target.MissingFields = updatedMissingFields
+				target.SourceText = updatedSource
+				target.UpdatedAt = now
+				merged[index] = target
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE meeting_open_questions SET is_deleted = 1, updated_at = ? WHERE id = ?`, now, question.ID); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		merged = append(merged, question)
 	}
 	return merged, nil
 }
@@ -1594,6 +2510,26 @@ func matchingActionItemIndex(existing []MeetingActionItem, task, owner, dueDate 
 			continue
 		}
 		if !sameOptionalField(item.DueDate, dueDate) && normalizeForCompare(item.DueDate) != "" && normalizeForCompare(dueDate) != "" {
+			continue
+		}
+		return index
+	}
+	return -1
+}
+
+func matchingActionItemIndexWithSource(existing []MeetingActionItem, task, owner, dueDate, sourceText string) int {
+	if index := matchingActionItemIndex(existing, task, owner, dueDate); index >= 0 {
+		return index
+	}
+	if !isRevisionSourceText(sourceText) {
+		return -1
+	}
+	for index, item := range existing {
+		if !similarStructuredText(item.Task, task) {
+			continue
+		}
+		taskScore := structuredTextSimilarity(item.Task, task)
+		if !sameOptionalField(item.Owner, owner) && taskScore < 0.78 {
 			continue
 		}
 		return index
@@ -1631,4 +2567,43 @@ func preferFilledText(existing, incoming string) string {
 		return incoming
 	}
 	return existing
+}
+
+func preferRevisionText(existing, incoming, sourceText string) string {
+	existing = strings.TrimSpace(existing)
+	incoming = strings.TrimSpace(incoming)
+	if incoming == "" {
+		return existing
+	}
+	if existing == "" {
+		return incoming
+	}
+	if normalizeForCompare(existing) == normalizeForCompare(incoming) {
+		return existing
+	}
+	if isRevisionSourceText(sourceText) {
+		return incoming
+	}
+	return existing
+}
+
+func mergeSourceText(existing, incoming string) string {
+	existing = strings.TrimSpace(existing)
+	incoming = strings.TrimSpace(incoming)
+	if incoming == "" {
+		return existing
+	}
+	if existing == "" {
+		return incoming
+	}
+	if strings.Contains(existing, incoming) {
+		return existing
+	}
+	if strings.Contains(incoming, existing) {
+		return incoming
+	}
+	if isRevisionSourceText(incoming) {
+		return existing + "\n" + incoming
+	}
+	return richerText(existing, incoming)
 }
