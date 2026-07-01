@@ -30,7 +30,7 @@ func TestSaveIntelligenceExtractionMergesNearDuplicateActionItems(t *testing.T) 
 	}
 
 	_, err = store.SaveIntelligenceExtraction(ctx, meeting.ID, IntelligenceExtraction{
-		Summary: "讨论火山 ASR 连接保持。",
+		Summary: SummaryExtraction{Brief: "讨论火山 ASR 连接保持。"},
 		ActionItems: []ActionItemExtraction{{
 			Task:   "继续排查Volcano ASR连接保持逻辑，重点关注是否应该在暂停期间保持连接以及是否需要等待",
 			Owner:  "王磊",
@@ -42,7 +42,7 @@ func TestSaveIntelligenceExtractionMergesNearDuplicateActionItems(t *testing.T) 
 	}
 
 	snapshot, err := store.SaveIntelligenceExtraction(ctx, meeting.ID, IntelligenceExtraction{
-		Summary: "继续讨论火山 ASR 连接保持。",
+		Summary: SummaryExtraction{Brief: "继续讨论火山 ASR 连接保持。"},
 		ActionItems: []ActionItemExtraction{{
 			Task:    "排查Volcano ASR连接保持逻辑，重点关注是否应该在暂停期间保持连接以及是否需要等待会议结束时的服务器正常关闭，并在本周五前给出结论。",
 			Owner:   "王磊",
@@ -76,6 +76,7 @@ func TestSaveIntelligenceExtractionAppliesLaterActionItemRevision(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer db.Close()
+	db.SetMaxOpenConns(1)
 
 	store := &Store{db: db}
 	if err := store.Init(ctx); err != nil {
@@ -124,6 +125,55 @@ func TestSaveIntelligenceExtractionAppliesLaterActionItemRevision(t *testing.T) 
 	}
 }
 
+func TestMergeActionItemsOnlyKeepsCompletedWhenAllSourcesCompleted(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	store := &Store{db: db}
+	if err := store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	meeting, _, err := store.CreateMeeting(ctx, "merge-status", "test", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err := store.CreateActionItem(ctx, meeting.ID, ActionItemMutation{Task: "Finish camera wiring", Status: "completed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	open, err := store.CreateActionItem(ctx, meeting.ID, ActionItemMutation{Task: "Confirm onsite network", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, _, err := store.MergeActionItems(ctx, meeting.ID, []string{done.ID, open.ID}, ActionItemMutation{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Status != "open" {
+		t.Fatalf("expected mixed completed/open merge to stay open, got %#v", merged)
+	}
+
+	doneA, err := store.CreateActionItem(ctx, meeting.ID, ActionItemMutation{Task: "Close checklist", Status: "completed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doneB, err := store.CreateActionItem(ctx, meeting.ID, ActionItemMutation{Task: "Archive test report", Status: "completed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, _, err = store.MergeActionItems(ctx, meeting.ID, []string{doneA.ID, doneB.ID}, ActionItemMutation{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Status != "completed" {
+		t.Fatalf("expected all-completed merge to stay completed, got %#v", merged)
+	}
+}
+
 func TestSaveIntelligenceExtractionAppliesEndOfMeetingActionItemRevision(t *testing.T) {
 	ctx := context.Background()
 	db, err := sql.Open("sqlite", ":memory:")
@@ -142,7 +192,7 @@ func TestSaveIntelligenceExtractionAppliesEndOfMeetingActionItemRevision(t *test
 	}
 
 	_, err = store.SaveIntelligenceExtraction(ctx, meeting.ID, IntelligenceExtraction{
-		Summary: "会议前半段确认压测脚本交付节奏。",
+		Summary: SummaryExtraction{Brief: "会议前半段确认压测脚本交付节奏。"},
 		ActionItems: []ActionItemExtraction{{
 			Task:       "完成支付链路压测脚本",
 			Owner:      "陈晨",
@@ -156,7 +206,7 @@ func TestSaveIntelligenceExtractionAppliesEndOfMeetingActionItemRevision(t *test
 	}
 
 	_, err = store.SaveIntelligenceExtraction(ctx, meeting.ID, IntelligenceExtraction{
-		Summary: "中途补充了接口清单整理任务。",
+		Summary: SummaryExtraction{Brief: "中途补充了接口清单整理任务。"},
 		ActionItems: []ActionItemExtraction{{
 			Task:       "整理回调接口字段清单",
 			Owner:      "赵强",
@@ -170,7 +220,7 @@ func TestSaveIntelligenceExtractionAppliesEndOfMeetingActionItemRevision(t *test
 	}
 
 	snapshot, err := store.SaveIntelligenceExtraction(ctx, meeting.ID, IntelligenceExtraction{
-		Summary: "会议结束前确认压测脚本最终交付时间改为周五。",
+		Summary: SummaryExtraction{Brief: "会议结束前确认压测脚本最终交付时间改为周五。"},
 		ActionItems: []ActionItemExtraction{{
 			Task:       "完成支付链路压测脚本",
 			Owner:      "陈晨",
@@ -370,7 +420,7 @@ func TestSaveIntelligenceExtractionStoresFormalIntelligenceShape(t *testing.T) {
 	snapshot, err := store.SaveIntelligenceExtraction(ctx, meeting.ID, IntelligenceExtraction{
 		Title:       "供应链系统评审会",
 		MeetingType: "project_followup",
-		Summary:     "本次会议确认了供应链系统的联调节奏、验收口径和接口延期风险。",
+		Summary:     SummaryExtraction{Brief: "本次会议确认了供应链系统的联调节奏、验收口径和接口延期风险。"},
 		Decisions: []DecisionExtraction{{
 			Content:    "联调环境继续沿用现有网关方案。",
 			SourceText: "大家确认联调环境继续沿用现有网关方案。",
@@ -394,6 +444,15 @@ func TestSaveIntelligenceExtractionStoresFormalIntelligenceShape(t *testing.T) {
 			Status:     "open",
 			SourceText: "灰度开关这件事还需要赵强确认。",
 		}},
+		FrameworkSections: []FrameworkSectionExtraction{{
+			SectionKey: "background",
+			Content:    "供应链系统进入联调阶段，需要统一供应商接口对接节奏。",
+			SourceText: "供应链系统现在进入联调阶段。",
+		}, {
+			SectionKey: "meeting_goal",
+			Content:    "确认联调节奏、验收口径和接口延期风险处理方式。",
+			SourceText: "今天主要确认联调节奏和验收口径。",
+		}},
 	}, 3)
 	if err != nil {
 		t.Fatal(err)
@@ -411,6 +470,16 @@ func TestSaveIntelligenceExtractionStoresFormalIntelligenceShape(t *testing.T) {
 	if len(snapshot.Decisions) != 1 || len(snapshot.ActionItems) != 1 || len(snapshot.Risks) != 1 || len(snapshot.OpenQuestions) != 1 {
 		t.Fatalf("unexpected formal intelligence counts: decisions=%d actionItems=%d risks=%d openQuestions=%d",
 			len(snapshot.Decisions), len(snapshot.ActionItems), len(snapshot.Risks), len(snapshot.OpenQuestions))
+	}
+	if meetingFrameworkFeatureEnabled() {
+		if len(snapshot.FrameworkSections) != 5 {
+			t.Fatalf("expected project follow-up framework sections to include 5 template modules, got %#v", snapshot.FrameworkSections)
+		}
+		if snapshot.FrameworkSections[0].SectionKey != "background" || !strings.Contains(snapshot.FrameworkSections[0].Content, "联调阶段") {
+			t.Fatalf("expected project background framework content, got %#v", snapshot.FrameworkSections[0])
+		}
+	} else if len(snapshot.FrameworkSections) != 0 {
+		t.Fatalf("expected framework sections to be hidden while feature is disabled, got %#v", snapshot.FrameworkSections)
 	}
 	if !hasString(snapshot.ActionItems[0].MissingFields, "due_date") {
 		t.Fatalf("expected action item missing fields to include due_date, got %#v", snapshot.ActionItems[0].MissingFields)
@@ -449,7 +518,7 @@ func TestManualMeetingTitleLocksAgainstAutomaticTitle(t *testing.T) {
 	snapshot, err := store.SaveIntelligenceExtraction(ctx, meeting.ID, IntelligenceExtraction{
 		Title:       "展会演示准备会",
 		MeetingType: "project_followup",
-		Summary:     "会议讨论展会演示准备工作。",
+		Summary:     SummaryExtraction{Brief: "会议讨论展会演示准备工作。"},
 	}, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -469,13 +538,309 @@ func TestManualMeetingTitleLocksAgainstAutomaticTitle(t *testing.T) {
 	snapshot, err = store.SaveIntelligenceExtraction(ctx, meeting.ID, IntelligenceExtraction{
 		Title:       "模型能力讨论会",
 		MeetingType: "exploration",
-		Summary:     "会议继续讨论模型能力。",
+		Summary:     SummaryExtraction{Brief: "会议继续讨论模型能力。"},
 	}, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if snapshot.Title != "客户试点复盘会" {
 		t.Fatalf("expected locked title to resist automatic overwrite, got %q", snapshot.Title)
+	}
+}
+
+func TestManualMeetingTypeLocksAgainstAutomaticType(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	store := &Store{db: db}
+	if err := store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	meeting, _, err := store.CreateMeeting(ctx, "类型选择测试", "general", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manual, err := store.UpdateMeetingType(ctx, meeting.ID, "project_followup", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manual.MeetingType != "project_followup" || !manual.TypeLocked {
+		t.Fatalf("expected manual meeting type to be locked, got %#v", manual)
+	}
+	snapshot, err := store.GetIntelligenceSnapshot(ctx, meeting.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meetingFrameworkFeatureEnabled() {
+		if len(snapshot.FrameworkSections) != 5 || snapshot.FrameworkSections[0].Title != "当前项目/事项背景" {
+			t.Fatalf("expected project framework templates after manual type change, got %#v", snapshot.FrameworkSections)
+		}
+	} else if len(snapshot.FrameworkSections) != 0 {
+		t.Fatalf("expected framework templates to be hidden while feature is disabled, got %#v", snapshot.FrameworkSections)
+	}
+
+	snapshot, err = store.SaveIntelligenceExtraction(ctx, meeting.ID, IntelligenceExtraction{
+		MeetingType: "exploration",
+		Summary:     SummaryExtraction{Brief: "模型判断为探索讨论会。"},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.MeetingType != "project_followup" {
+		t.Fatalf("expected locked meeting type to resist automatic overwrite, got %q", snapshot.MeetingType)
+	}
+}
+
+func TestMeetingTypeFrameworkTemplates(t *testing.T) {
+	if !meetingFrameworkFeatureEnabled() {
+		t.Skip("meeting framework feature is temporarily disabled")
+	}
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	store := &Store{db: db}
+	if err := store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	meeting, _, err := store.CreateMeeting(ctx, "框架模板测试", "general", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		meetingType string
+		titles      []string
+	}{
+		{"exploration", []string{"讨论背景", "核心问题", "已提出想法", "支持理由", "反对意见/风险", "待验证假设", "下一步探索动作"}},
+		{"retrospective", []string{"目标与实际结果", "做得好的地方", "暴露的问题", "可能原因", "改进方案", "后续行动", "可沉淀经验"}},
+		{"general", []string{"时间线摘要", "关键观点", "未解决问题"}},
+	}
+	for _, tc := range cases {
+		if _, err := store.UpdateMeetingType(ctx, meeting.ID, tc.meetingType, true); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := store.GetIntelligenceSnapshot(ctx, meeting.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := frameworkSectionTitles(snapshot.FrameworkSections); strings.Join(got, "|") != strings.Join(tc.titles, "|") {
+			t.Fatalf("unexpected %s framework titles: got %#v want %#v", tc.meetingType, got, tc.titles)
+		}
+	}
+}
+
+func TestSaveIntelligenceExtractionStoresAllMeetingTypeFrameworkSections(t *testing.T) {
+	if !meetingFrameworkFeatureEnabled() {
+		t.Skip("meeting framework feature is temporarily disabled")
+	}
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	store := &Store{db: db}
+	if err := store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	meeting, _, err := store.CreateMeeting(ctx, "多类型框架测试", "general", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		meetingType string
+		sectionKey  string
+		title       string
+		content     string
+	}{
+		{"exploration", "core_question", "核心问题", "是否应该把会中交互作为正式版主卖点。"},
+		{"retrospective", "lessons_learned", "可沉淀经验", "演示前需要提前锁定网络、麦克风和模型配置。"},
+		{"general", "unresolved_issues", "未解决问题", "分享二维码的公网访问策略还没有最终确定。"},
+	}
+	for _, tc := range cases {
+		if _, err := store.UpdateMeetingType(ctx, meeting.ID, tc.meetingType, true); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := store.SaveIntelligenceExtraction(ctx, meeting.ID, IntelligenceExtraction{
+			MeetingType: tc.meetingType,
+			FrameworkSections: []FrameworkSectionExtraction{{
+				SectionKey: tc.sectionKey,
+				Title:      tc.title,
+				Content:    tc.content,
+				SourceText: tc.content,
+			}},
+		}, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		section := findFrameworkSection(snapshot.FrameworkSections, tc.sectionKey)
+		if section == nil || section.Title != tc.title || !strings.Contains(section.Content, tc.content) {
+			t.Fatalf("expected %s framework section %s to be stored, got %#v", tc.meetingType, tc.sectionKey, section)
+		}
+	}
+}
+
+func TestManualFrameworkSectionLocksAgainstAutomaticExtraction(t *testing.T) {
+	if !meetingFrameworkFeatureEnabled() {
+		t.Skip("meeting framework feature is temporarily disabled")
+	}
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	store := &Store{db: db}
+	if err := store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	meeting, _, err := store.CreateMeeting(ctx, "框架锁定测试", "project_followup", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manual, err := store.ApplyFrameworkSectionMutation(ctx, meeting.ID, "project_followup", "current_progress", FrameworkSectionMutation{
+		Mode:       "replace",
+		Content:    "人工确认：实时转写已稳定，结构化提取还在优化。",
+		SourceText: "小艾小艾，把当前进展改成实时转写已稳定，结构化提取还在优化。",
+		Locked:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !manual.Locked || manual.Source != "interaction" {
+		t.Fatalf("expected manual framework section to be locked, got %#v", manual)
+	}
+
+	snapshot, err := store.SaveIntelligenceExtraction(ctx, meeting.ID, IntelligenceExtraction{
+		MeetingType: "project_followup",
+		FrameworkSections: []FrameworkSectionExtraction{{
+			SectionKey: "current_progress",
+			Content:    "自动提取：当前仍在排查转写链路。",
+			SourceText: "当前仍在排查转写链路。",
+		}},
+	}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	progress := findFrameworkSection(snapshot.FrameworkSections, "current_progress")
+	if progress == nil || !strings.Contains(progress.Content, "人工确认") {
+		t.Fatalf("expected manual framework section to resist automatic overwrite, got %#v", progress)
+	}
+}
+
+func TestSaveIntelligenceExtractionStoresVisibleDynamicSections(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	store := &Store{db: db}
+	if err := store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	meeting, _, err := store.CreateMeeting(ctx, "dynamic-section", "test", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.SaveIntelligenceExtraction(ctx, meeting.ID, IntelligenceExtraction{
+		Summary: SummaryExtraction{Brief: "Discussed launch budget and customer acceptance concerns."},
+		DynamicSections: []DynamicSectionExtraction{{
+			SectionKey:  "budget_constraints",
+			Title:       "Budget Constraints",
+			Description: "Budget limits mentioned during the meeting.",
+			Items: []DynamicSectionItemExtraction{{
+				Title:      "Demo budget ceiling",
+				Content:    "The demo budget should stay below 80,000 yuan unless management approves an exception.",
+				SourceText: "Keep the demo budget under 80,000; anything above that needs management approval.",
+			}},
+		}},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(snapshot.DynamicSections) != 1 {
+		t.Fatalf("expected one dynamic section, got %#v", snapshot.DynamicSections)
+	}
+	section := snapshot.DynamicSections[0]
+	if section.SectionKey != "budget_constraints" || section.Visibility != "visible" {
+		t.Fatalf("expected visible budget section, got %#v", section)
+	}
+	if len(section.Items) != 1 || !strings.Contains(section.Items[0].Content, "80,000") {
+		t.Fatalf("expected dynamic section item to be stored, got %#v", section.Items)
+	}
+
+	snapshot, err = store.SaveIntelligenceExtraction(ctx, meeting.ID, IntelligenceExtraction{
+		DynamicSections: []DynamicSectionExtraction{{
+			SectionKey:  "budget_constraints",
+			Title:       "Budget Constraints",
+			Description: "Budget limits and approval requirements for the onsite demo rollout.",
+			Items: []DynamicSectionItemExtraction{{
+				Title:      "Demo budget ceiling",
+				Content:    "The demo budget should stay below 80,000 yuan unless management approves an exception.",
+				SourceText: "The same budget ceiling was repeated.",
+			}},
+		}},
+	}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(snapshot.DynamicSections) != 1 || len(snapshot.DynamicSections[0].Items) != 1 {
+		t.Fatalf("expected duplicate dynamic section to merge, got %#v", snapshot.DynamicSections)
+	}
+	if !strings.Contains(snapshot.DynamicSections[0].Description, "approval") {
+		t.Fatalf("expected richer section description, got %#v", snapshot.DynamicSections[0])
+	}
+
+	visible, err := store.SetDynamicSectionVisibility(ctx, meeting.ID, section.ID, "visible")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if visible.Visibility != "visible" {
+		t.Fatalf("expected dynamic section to become visible, got %#v", visible)
+	}
+	snapshot, err = store.GetIntelligenceSnapshot(ctx, meeting.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 1 || snapshot.DynamicSections[0].Visibility != "visible" {
+		t.Fatalf("expected visible dynamic section in snapshot, got %#v", snapshot.DynamicSections)
+	}
+	affected, err := store.SetAllDynamicSectionVisibility(ctx, meeting.ID, "hidden")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if affected != 1 {
+		t.Fatalf("expected one dynamic section to be updated, got %d", affected)
+	}
+	snapshot, err = store.GetIntelligenceSnapshot(ctx, meeting.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.DynamicSections[0].Visibility != "hidden" {
+		t.Fatalf("expected dynamic section to become hidden again, got %#v", snapshot.DynamicSections[0])
 	}
 }
 
@@ -548,6 +913,23 @@ func findActionItemByTaskPart(items []MeetingActionItem, taskPart string) *Meeti
 		}
 	}
 	return nil
+}
+
+func findFrameworkSection(sections []MeetingFrameworkSection, sectionKey string) *MeetingFrameworkSection {
+	for index := range sections {
+		if sections[index].SectionKey == sectionKey {
+			return &sections[index]
+		}
+	}
+	return nil
+}
+
+func frameworkSectionTitles(sections []MeetingFrameworkSection) []string {
+	titles := make([]string, 0, len(sections))
+	for _, section := range sections {
+		titles = append(titles, section.Title)
+	}
+	return titles
 }
 
 func hasMissingAlert(alerts []MissingFieldAlert, targetType, field string) bool {

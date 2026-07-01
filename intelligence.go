@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -13,6 +15,7 @@ const (
 	intelligenceMinInterval = 10 * time.Second
 	intelligenceMinNewChars = 250
 	intelligenceBusyRetry   = 2 * time.Second
+	intelligenceLLMTimeout  = 150 * time.Second
 )
 
 func (s *Server) scheduleIntelligenceAnalysis(ctx context.Context, meetingID string) {
@@ -60,7 +63,12 @@ func (s *Server) runIntelligenceAnalysis(ctx context.Context, meetingID string, 
 	s.intelMu.Lock()
 	s.ensureIntelligenceMapsLocked()
 	if s.intelBusy[meetingID] {
-		s.setIntelligenceTimerLocked(meetingID, intelligenceBusyRetry, force)
+		if force {
+			s.intelMu.Unlock()
+			s.broadcastIntelligenceStatus(meetingID, "running", "已有结构化任务正在运行，请等待当前任务完成。")
+			return
+		}
+		s.setIntelligenceTimerLocked(meetingID, intelligenceBusyRetry, false)
 		s.intelMu.Unlock()
 		return
 	}
@@ -128,16 +136,21 @@ func (s *Server) runIntelligenceAnalysis(ctx context.Context, meetingID string, 
 		return
 	}
 
-	llmCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	llmCtx, cancel := context.WithTimeout(ctx, intelligenceLLMTimeout)
 	defer cancel()
-	s.broadcastIntelligenceStatus(meetingID, "running", "正在结构化分析会议内容...")
+	s.broadcastIntelligenceStatus(meetingID, "running", fmt.Sprintf("正在结构化分析会议内容，模型：%s，最长等待 %d 秒...", cfg.Model, int(intelligenceLLMTimeout.Seconds())))
 	result, err := s.callLLMForIntelligence(llmCtx, cfg, transcript, current)
 	if err != nil {
 		log.Printf("llm intelligence failed meeting=%s: %v", meetingID, err)
+		message := "结构化分析失败：" + err.Error()
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "context deadline exceeded") {
+			message = fmt.Sprintf("结构化分析超时：LLM 在 %d 秒内没有返回，请稍后重试，或把结构化模型换成更快的模型。", int(intelligenceLLMTimeout.Seconds()))
+		}
+		s.broadcastIntelligenceStatus(meetingID, "failed", message)
 		s.hub.Broadcast(map[string]any{
 			"type":      "intelligence_error",
 			"meetingId": meetingID,
-			"message":   err.Error(),
+			"message":   message,
 			"timestamp": nowString(),
 		})
 		return

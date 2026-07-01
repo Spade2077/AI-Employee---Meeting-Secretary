@@ -235,7 +235,7 @@ func encodeStringList(values []string) string {
 
 func matchingRiskIndex(existing []MeetingRisk, content string) int {
 	for index, risk := range existing {
-		if similarStructuredText(risk.Content, content) {
+		if structuredTextShouldMerge(risk.Content, content) {
 			return index
 		}
 	}
@@ -244,7 +244,7 @@ func matchingRiskIndex(existing []MeetingRisk, content string) int {
 
 func matchingOpenQuestionIndex(existing []MeetingOpenQuestion, question string) int {
 	for index, item := range existing {
-		if similarStructuredText(item.Question, question) {
+		if structuredTextShouldMerge(item.Question, question) {
 			return index
 		}
 	}

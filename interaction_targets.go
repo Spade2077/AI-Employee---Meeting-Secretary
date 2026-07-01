@@ -55,6 +55,26 @@ func (s *Server) resolveMergeActionItemIDs(ctx context.Context, meetingID string
 	return ids, nil
 }
 
+func (s *Server) actionItemSnapshots(ctx context.Context, meetingID string, ids []string) ([]MeetingActionItem, error) {
+	actionItems, err := s.store.ListActionItems(ctx, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	byID := map[string]MeetingActionItem{}
+	for _, item := range actionItems {
+		byID[item.ID] = item
+	}
+	result := make([]MeetingActionItem, 0, len(ids))
+	for _, id := range uniqueNonEmptyStrings(ids) {
+		item, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("action item id %s not found", id)
+		}
+		result = append(result, item)
+	}
+	return result, nil
+}
+
 func (s *Server) resolveDecisionTarget(ctx context.Context, meetingID string, command InteractionCommand) (int, *MeetingDecision, error) {
 	decisions, err := s.store.ListDecisions(ctx, meetingID)
 	if err != nil {
@@ -101,6 +121,26 @@ func (s *Server) resolveMergeDecisionIDs(ctx context.Context, meetingID string, 
 		return nil, fmt.Errorf("merge requires at least two decision targets")
 	}
 	return ids, nil
+}
+
+func (s *Server) decisionSnapshots(ctx context.Context, meetingID string, ids []string) ([]MeetingDecision, error) {
+	decisions, err := s.store.ListDecisions(ctx, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	byID := map[string]MeetingDecision{}
+	for _, decision := range decisions {
+		byID[decision.ID] = decision
+	}
+	result := make([]MeetingDecision, 0, len(ids))
+	for _, id := range uniqueNonEmptyStrings(ids) {
+		decision, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("decision id %s not found", id)
+		}
+		result = append(result, decision)
+	}
+	return result, nil
 }
 
 func (s *Server) resolveRiskTarget(ctx context.Context, meetingID string, command InteractionCommand) (int, *MeetingRisk, error) {
@@ -197,6 +237,196 @@ func (s *Server) resolveMergeOpenQuestionIDs(ctx context.Context, meetingID stri
 		return nil, fmt.Errorf("merge requires at least two open question targets")
 	}
 	return ids, nil
+}
+
+func (s *Server) resolveDynamicSectionTarget(ctx context.Context, meetingID string, command InteractionCommand) (int, *MeetingDynamicSection, error) {
+	sections, err := s.store.ListDynamicSections(ctx, meetingID)
+	if err != nil {
+		return 0, nil, err
+	}
+	targetID := strings.TrimSpace(command.TargetID)
+	if targetID != "" {
+		for index, section := range sections {
+			if section.ID == targetID {
+				return index + 1, &sections[index], nil
+			}
+		}
+	}
+	if command.TargetIndex > 0 {
+		if command.TargetIndex > len(sections) {
+			return 0, nil, fmt.Errorf("dynamic section index %d out of range", command.TargetIndex)
+		}
+		return command.TargetIndex, &sections[command.TargetIndex-1], nil
+	}
+
+	candidates := []string{
+		command.SectionKey,
+		command.SectionTitle,
+		command.Title,
+		command.Reason,
+	}
+	for _, candidate := range candidates {
+		key := normalizeForCompare(candidate)
+		if key == "" {
+			continue
+		}
+		for index, section := range sections {
+			if normalizeForCompare(section.SectionKey) == key ||
+				normalizeForCompare(section.Title) == key ||
+				similarStructuredText(section.Title, candidate) ||
+				strings.Contains(normalizeForCompare(section.Title), key) ||
+				strings.Contains(key, normalizeForCompare(section.Title)) {
+				return index + 1, &sections[index], nil
+			}
+		}
+	}
+	return 0, nil, fmt.Errorf("dynamic section target not found")
+}
+
+func (s *Server) resolveMergeDynamicSectionIDs(ctx context.Context, meetingID string, command InteractionCommand) ([]string, error) {
+	sections, err := s.store.ListDynamicSections(ctx, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	ids := append([]string{}, command.SourceIDs...)
+	if command.TargetID != "" {
+		ids = append([]string{command.TargetID}, ids...)
+	}
+	for _, index := range command.SourceIndices {
+		if index <= 0 || index > len(sections) {
+			return nil, fmt.Errorf("dynamic section index %d out of range", index)
+		}
+		ids = append(ids, sections[index-1].ID)
+	}
+	if command.TargetID == "" && command.TargetIndex > 0 {
+		if command.TargetIndex > len(sections) {
+			return nil, fmt.Errorf("dynamic section index %d out of range", command.TargetIndex)
+		}
+		ids = append([]string{sections[command.TargetIndex-1].ID}, ids...)
+	}
+	for _, candidate := range []string{command.SectionTitle, command.Title, command.Content, command.Reason} {
+		key := normalizeForCompare(candidate)
+		if key == "" {
+			continue
+		}
+		for _, section := range sections {
+			sectionTitle := normalizeForCompare(section.Title)
+			sectionKey := normalizeForCompare(section.SectionKey)
+			if sectionTitle != "" && strings.Contains(key, sectionTitle) ||
+				sectionKey != "" && strings.Contains(key, sectionKey) {
+				ids = append(ids, section.ID)
+			}
+		}
+	}
+	ids = uniqueNonEmptyStrings(ids)
+	if len(ids) < 2 {
+		return nil, fmt.Errorf("merge requires at least two dynamic section targets")
+	}
+	return ids, nil
+}
+
+func (s *Server) dynamicSectionSnapshots(ctx context.Context, meetingID string, ids []string) ([]MeetingDynamicSection, error) {
+	sections, err := s.store.ListDynamicSections(ctx, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	byID := map[string]MeetingDynamicSection{}
+	for _, section := range sections {
+		byID[section.ID] = section
+	}
+	result := make([]MeetingDynamicSection, 0, len(ids))
+	for _, id := range uniqueNonEmptyStrings(ids) {
+		section, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("dynamic section id %s not found", id)
+		}
+		result = append(result, section)
+	}
+	return result, nil
+}
+
+func (s *Server) resolveDynamicSectionItemTarget(ctx context.Context, meetingID string, command InteractionCommand) (int, *MeetingDynamicSection, int, *MeetingDynamicSectionItem, error) {
+	sections, err := s.store.ListDynamicSections(ctx, meetingID)
+	if err != nil {
+		return 0, nil, 0, nil, err
+	}
+	itemIDs := append([]string{}, command.SourceIDs...)
+	if strings.TrimSpace(command.TargetID) != "" {
+		itemIDs = append(itemIDs, command.TargetID)
+	}
+	itemIDs = uniqueNonEmptyStrings(itemIDs)
+	for _, itemID := range itemIDs {
+		for sectionIndex := range sections {
+			for itemIndex := range sections[sectionIndex].Items {
+				if sections[sectionIndex].Items[itemIndex].ID == itemID {
+					return sectionIndex + 1, &sections[sectionIndex], itemIndex + 1, &sections[sectionIndex].Items[itemIndex], nil
+				}
+			}
+		}
+	}
+
+	sectionIndex, section, err := s.resolveDynamicSectionTarget(ctx, meetingID, command)
+	if err != nil {
+		return 0, nil, 0, nil, err
+	}
+	itemIndex := 0
+	if len(command.SourceIndices) > 0 {
+		itemIndex = command.SourceIndices[0]
+	}
+	if itemIndex <= 0 || itemIndex > len(section.Items) {
+		return 0, nil, 0, nil, fmt.Errorf("dynamic section item index %d out of range", itemIndex)
+	}
+	return sectionIndex, section, itemIndex, &section.Items[itemIndex-1], nil
+}
+
+func (s *Server) resolveFrameworkSectionTarget(ctx context.Context, meetingID string, command InteractionCommand) (int, *MeetingFrameworkSection, error) {
+	snapshot, err := s.store.GetIntelligenceSnapshot(ctx, meetingID)
+	if err != nil {
+		return 0, nil, err
+	}
+	sections := snapshot.FrameworkSections
+	targetID := strings.TrimSpace(command.TargetID)
+	if targetID != "" {
+		for index, section := range sections {
+			if section.ID == targetID {
+				return index + 1, &sections[index], nil
+			}
+		}
+	}
+	if command.TargetIndex > 0 {
+		if command.TargetIndex > len(sections) {
+			return 0, nil, fmt.Errorf("framework section index %d out of range", command.TargetIndex)
+		}
+		return command.TargetIndex, &sections[command.TargetIndex-1], nil
+	}
+
+	candidates := []string{
+		command.SectionKey,
+		command.SectionTitle,
+		command.Title,
+		command.Reason,
+	}
+	for _, candidate := range candidates {
+		key := normalizeFrameworkSectionKey(snapshot.MeetingType, candidate, candidate)
+		compare := normalizeForCompare(candidate)
+		if key == "" && compare == "" {
+			continue
+		}
+		for index, section := range sections {
+			sectionKey := normalizeFrameworkSectionKey(snapshot.MeetingType, section.SectionKey, section.Title)
+			titleKey := normalizeForCompare(section.Title)
+			if key != "" && sectionKey == key {
+				return index + 1, &sections[index], nil
+			}
+			if compare != "" && (titleKey == compare ||
+				strings.Contains(titleKey, compare) ||
+				strings.Contains(compare, titleKey) ||
+				similarStructuredText(section.Title, candidate)) {
+				return index + 1, &sections[index], nil
+			}
+		}
+	}
+	return 0, nil, fmt.Errorf("framework section target not found")
 }
 
 func actionItemMutationFromCommand(command InteractionCommand) ActionItemMutation {

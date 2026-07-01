@@ -220,6 +220,43 @@
       flex-wrap: wrap;
       justify-content: flex-end;
     }
+    .intelligence-status-badge {
+      flex-basis: 100%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .intelligence-status-badge::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #94a3b8;
+    }
+    .intelligence-status-badge.running {
+      color: #1d4ed8;
+    }
+    .intelligence-status-badge.running::before {
+      background: var(--blue);
+      box-shadow: 0 0 0 5px rgba(37, 99, 235, 0.12);
+      animation: pulse 1.3s ease-in-out infinite;
+    }
+    .intelligence-status-badge.completed {
+      color: #15803d;
+    }
+    .intelligence-status-badge.completed::before {
+      background: var(--green);
+    }
+    .intelligence-status-badge.failed {
+      color: #b91c1c;
+    }
+    .intelligence-status-badge.failed::before {
+      background: var(--red);
+    }
     .mini-count,
     .live-chip {
       display: inline-flex;
@@ -328,6 +365,10 @@
     .mic-note.warning {
       color: #b91c1c;
       font-weight: 700;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.45; transform: scale(0.92); }
+      50% { opacity: 1; transform: scale(1.08); }
     }
     .list {
       margin: 0;
@@ -1181,7 +1222,8 @@
         </div>
         <div class="summary-actions">
           <span id="summaryCount" class="mini-count">0</span>
-          <button onclick="analyzeNow()">立即结构化</button>
+          <button id="analyzeNowBtn" onclick="analyzeNow()">立即结构化</button>
+          <span id="intelligenceStatusBadge" class="intelligence-status-badge">等待结构化</span>
         </div>
       </div>
       <div id="summaryBox" class="summary-text placeholder">暂无摘要</div>
@@ -1247,6 +1289,7 @@ let activeInteractionEventId = "";
 let latestListMutation = null;
 let selectedAudioInputDeviceId = localStorage.getItem("meetingAudioInputDeviceId") || "";
 let latestClipRatio = 0;
+let intelligenceRunState = "idle";
 let currentMeetingView = localStorage.getItem("meetingView") || "live";
 const pageMode = window.__PAGE_MODE__ || "debug";
 const routeMeetingId = window.__ROUTE_MEETING_ID__ || "";
@@ -1837,7 +1880,7 @@ async function analyzeNow() {
     alert("请先创建会议");
     return;
   }
-  renderIntelligenceStatus("正在请求结构化分析...");
+  renderIntelligenceStatus("running", "正在请求结构化分析...");
   const res = await fetch("/api/meetings/" + currentMeetingId + "/intelligence/analyze", { method: "POST" });
   await handleResponse(res);
 }
@@ -1865,8 +1908,13 @@ function renderIntelligence(snapshot) {
   document.getElementById("riskCount").textContent = risks.length;
   document.getElementById("questionCount").textContent = questions.length;
 
-  summaryBox.textContent = summary || "暂无摘要";
-  summaryBox.className = summary ? "summary-text" : "summary-text placeholder";
+  if (intelligenceRunState !== "running") {
+    summaryBox.textContent = summary || "暂无摘要";
+    summaryBox.className = summary ? "summary-text" : "summary-text placeholder";
+  }
+  if (summary && intelligenceRunState !== "running") {
+    renderIntelligenceStatus("completed", "结构化结果已加载。");
+  }
 
   renderAnimatedList(decisionsList, decisions, {
     kind: "decisions",
@@ -1956,10 +2004,25 @@ function renderIntelligence(snapshot) {
   raw.textContent = JSON.stringify(snapshot || null, null, 2);
 }
 
-function renderIntelligenceStatus(message) {
+function renderIntelligenceStatus(status, message) {
+  if (message == null) {
+    message = status || "";
+    status = message.includes("失败") || message.includes("超时") ? "failed" : message.includes("正在") ? "running" : "idle";
+  }
+  intelligenceRunState = status || "idle";
+  const badge = document.getElementById("intelligenceStatusBadge");
+  if (badge) {
+    badge.textContent = message || "等待结构化";
+    badge.className = "intelligence-status-badge " + intelligenceRunState;
+  }
+  const button = document.getElementById("analyzeNowBtn");
+  if (button) {
+    button.disabled = intelligenceRunState === "running";
+    button.textContent = intelligenceRunState === "running" ? "结构化中..." : "立即结构化";
+  }
   const summaryBox = document.getElementById("summaryBox");
   if (!summaryBox) return;
-  if (!summaryBox.textContent || summaryBox.className.includes("placeholder") || message.includes("正在")) {
+  if (!summaryBox.textContent || summaryBox.className.includes("placeholder") || intelligenceRunState === "running" || intelligenceRunState === "failed") {
     summaryBox.textContent = message;
     summaryBox.className = "summary-text placeholder";
   }
@@ -2522,10 +2585,13 @@ function connectWS() {
     if (msg.type === "interaction_status") renderInteractionStatus(msg);
     if (msg.type === "interaction_update") renderInteractionUpdate(msg);
     if (msg.type === "intelligence_status") {
-      renderIntelligenceStatus(msg.message || msg.status);
+      renderIntelligenceStatus(msg.status || "idle", msg.message || msg.status);
       console.info(msg.message || msg.status);
     }
-    if (msg.type === "intelligence_error") console.error(msg.message);
+    if (msg.type === "intelligence_error") {
+      renderIntelligenceStatus("failed", msg.message || "结构化分析失败");
+      console.error(msg.message);
+    }
     if (msg.type === "stt_error") console.error(msg.message);
   };
   ws.onclose = () => setTimeout(connectWS, 1000);

@@ -12,18 +12,24 @@ import (
 )
 
 type interactionUndoPayload struct {
-	Type           string                `json:"type"`
-	Meeting        *Meeting              `json:"meeting,omitempty"`
-	ActionItem     *MeetingActionItem    `json:"action_item,omitempty"`
-	ActionItemID   string                `json:"action_item_id,omitempty"`
-	Decision       *MeetingDecision      `json:"decision,omitempty"`
-	DecisionID     string                `json:"decision_id,omitempty"`
-	Risk           *MeetingRisk          `json:"risk,omitempty"`
-	RiskID         string                `json:"risk_id,omitempty"`
-	Risks          []MeetingRisk         `json:"risks,omitempty"`
-	OpenQuestion   *MeetingOpenQuestion  `json:"open_question,omitempty"`
-	OpenQuestionID string                `json:"open_question_id,omitempty"`
-	OpenQuestions  []MeetingOpenQuestion `json:"open_questions,omitempty"`
+	Type               string                     `json:"type"`
+	Meeting            *Meeting                   `json:"meeting,omitempty"`
+	Summary            *MeetingSummary            `json:"summary,omitempty"`
+	ActionItem         *MeetingActionItem         `json:"action_item,omitempty"`
+	ActionItemID       string                     `json:"action_item_id,omitempty"`
+	ActionItems        []MeetingActionItem        `json:"action_items,omitempty"`
+	Decision           *MeetingDecision           `json:"decision,omitempty"`
+	DecisionID         string                     `json:"decision_id,omitempty"`
+	Decisions          []MeetingDecision          `json:"decisions,omitempty"`
+	Risk               *MeetingRisk               `json:"risk,omitempty"`
+	RiskID             string                     `json:"risk_id,omitempty"`
+	Risks              []MeetingRisk              `json:"risks,omitempty"`
+	OpenQuestion       *MeetingOpenQuestion       `json:"open_question,omitempty"`
+	OpenQuestionID     string                     `json:"open_question_id,omitempty"`
+	OpenQuestions      []MeetingOpenQuestion      `json:"open_questions,omitempty"`
+	FrameworkSection   *MeetingFrameworkSection   `json:"framework_section,omitempty"`
+	DynamicSections    []MeetingDynamicSection    `json:"dynamic_sections,omitempty"`
+	DynamicSectionItem *MeetingDynamicSectionItem `json:"dynamic_section_item,omitempty"`
 }
 
 func (s *Server) saveUndoRecord(ctx context.Context, meetingID, eventID string, payload interactionUndoPayload) error {
@@ -110,6 +116,37 @@ func (s *Server) applyUndoPayload(ctx context.Context, meetingID string, payload
 		}
 		return fmt.Sprintf("已撤销上一步操作，删除刚刚新增的待办：%s", item.Task), nil
 
+	case "restore_action_item_set":
+		if len(payload.ActionItems) == 0 {
+			return "撤销失败：缺少待办快照。", fmt.Errorf("undo action item set missing")
+		}
+		for _, item := range payload.ActionItems {
+			item.MeetingID = meetingID
+			if _, err := s.store.RestoreActionItem(ctx, item); err != nil {
+				return "撤销合并待办失败。", err
+			}
+		}
+		return fmt.Sprintf("已撤销上一步操作，恢复 %d 条待办。", len(payload.ActionItems)), nil
+
+	case "restore_action_item_delete_decision":
+		if payload.ActionItem == nil {
+			return "撤销失败：缺少待办快照。", fmt.Errorf("undo moved action item snapshot missing")
+		}
+		payload.ActionItem.MeetingID = meetingID
+		if _, err := s.store.RestoreActionItem(ctx, *payload.ActionItem); err != nil {
+			return "撤销待办转决策失败。", err
+		}
+		decisionID := strings.TrimSpace(payload.DecisionID)
+		if decisionID == "" && payload.Decision != nil {
+			decisionID = payload.Decision.ID
+		}
+		if decisionID != "" {
+			if _, err := s.store.DeleteDecision(ctx, meetingID, decisionID); err != nil {
+				return "撤销待办转决策失败。", err
+			}
+		}
+		return fmt.Sprintf("已撤销上一步操作，恢复待办：%s", payload.ActionItem.Task), nil
+
 	case "restore_decision":
 		if payload.Decision == nil {
 			return "撤销失败：缺少决策快照。", fmt.Errorf("undo decision snapshot missing")
@@ -134,6 +171,37 @@ func (s *Server) applyUndoPayload(ctx context.Context, meetingID string, payload
 			return "撤销新增决策失败。", err
 		}
 		return fmt.Sprintf("已撤销上一步操作，删除刚刚新增的决策：%s", decision.Content), nil
+
+	case "restore_decision_set":
+		if len(payload.Decisions) == 0 {
+			return "撤销失败：缺少决策快照。", fmt.Errorf("undo decision set missing")
+		}
+		for _, decision := range payload.Decisions {
+			decision.MeetingID = meetingID
+			if _, err := s.store.RestoreDecision(ctx, decision); err != nil {
+				return "撤销合并决策失败。", err
+			}
+		}
+		return fmt.Sprintf("已撤销上一步操作，恢复 %d 条决策。", len(payload.Decisions)), nil
+
+	case "restore_decision_delete_action_item":
+		if payload.Decision == nil {
+			return "撤销失败：缺少决策快照。", fmt.Errorf("undo moved decision snapshot missing")
+		}
+		payload.Decision.MeetingID = meetingID
+		if _, err := s.store.RestoreDecision(ctx, *payload.Decision); err != nil {
+			return "撤销决策转待办失败。", err
+		}
+		actionItemID := strings.TrimSpace(payload.ActionItemID)
+		if actionItemID == "" && payload.ActionItem != nil {
+			actionItemID = payload.ActionItem.ID
+		}
+		if actionItemID != "" {
+			if _, err := s.store.DeleteActionItem(ctx, meetingID, actionItemID); err != nil {
+				return "撤销决策转待办失败。", err
+			}
+		}
+		return fmt.Sprintf("已撤销上一步操作，恢复决策：%s", payload.Decision.Content), nil
 
 	case "restore_risk":
 		if payload.Risk == nil {
@@ -208,6 +276,101 @@ func (s *Server) applyUndoPayload(ctx context.Context, meetingID string, payload
 			}
 		}
 		return fmt.Sprintf("已撤销上一步操作，恢复 %d 条待确认问题。", len(payload.OpenQuestions)), nil
+
+	case "delete_dynamic_section":
+		if len(payload.DynamicSections) == 0 || strings.TrimSpace(payload.DynamicSections[0].ID) == "" {
+			return "撤销失败：缺少动态模块快照。", fmt.Errorf("undo dynamic section snapshot missing")
+		}
+		section, err := s.store.DeleteDynamicSection(ctx, meetingID, payload.DynamicSections[0].ID)
+		if err != nil {
+			return "撤销新增动态模块失败。", err
+		}
+		return fmt.Sprintf("已撤销上一步操作，删除刚刚新增的动态模块：%s", section.Title), nil
+
+	case "delete_dynamic_section_item":
+		if payload.DynamicSectionItem == nil || strings.TrimSpace(payload.DynamicSectionItem.ID) == "" {
+			return "撤销失败：缺少动态模块条目快照。", fmt.Errorf("undo dynamic section item snapshot missing")
+		}
+		item, err := s.store.DeleteDynamicSectionItem(ctx, meetingID, payload.DynamicSectionItem.ID)
+		if err != nil {
+			return "撤销新增动态模块条目失败。", err
+		}
+		return fmt.Sprintf("已撤销上一步操作，删除刚刚追加的动态模块条目：%s", item.Content), nil
+
+	case "restore_dynamic_section":
+		if len(payload.DynamicSections) == 0 || strings.TrimSpace(payload.DynamicSections[0].ID) == "" {
+			return "撤销失败：缺少动态模块快照。", fmt.Errorf("undo dynamic section snapshot missing")
+		}
+		previous := payload.DynamicSections[0]
+		previous.MeetingID = meetingID
+		section, err := s.store.RestoreDynamicSection(ctx, previous)
+		if err != nil {
+			return "撤销动态模块变更失败。", err
+		}
+		return fmt.Sprintf("已撤销上一步操作，恢复动态模块：%s", section.Title), nil
+
+	case "restore_dynamic_section_item":
+		if payload.DynamicSectionItem == nil || strings.TrimSpace(payload.DynamicSectionItem.ID) == "" {
+			return "撤销失败：缺少动态模块条目快照。", fmt.Errorf("undo dynamic section item snapshot missing")
+		}
+		item, err := s.store.UpdateDynamicSectionItem(ctx, meetingID, payload.DynamicSectionItem.ID, payload.DynamicSectionItem.Title, payload.DynamicSectionItem.Content)
+		if err != nil {
+			return "撤销动态模块条目变更失败。", err
+		}
+		if len(payload.DynamicSections) > 0 && strings.TrimSpace(payload.DynamicSections[0].ID) != "" && payload.DynamicSections[0].Visibility != "" {
+			if _, err := s.store.SetDynamicSectionVisibility(ctx, meetingID, payload.DynamicSections[0].ID, payload.DynamicSections[0].Visibility); err != nil {
+				return "撤销动态模块展示状态失败。", err
+			}
+		}
+		return fmt.Sprintf("已撤销上一步操作，恢复动态模块条目：%s", item.Content), nil
+
+	case "restore_dynamic_section_set":
+		if len(payload.DynamicSections) == 0 {
+			return "撤销失败：缺少动态模块快照。", fmt.Errorf("undo dynamic section set missing")
+		}
+		for _, section := range payload.DynamicSections {
+			section.MeetingID = meetingID
+			if _, err := s.store.RestoreDynamicSection(ctx, section); err != nil {
+				return "撤销动态模块合并失败。", err
+			}
+		}
+		return fmt.Sprintf("已撤销上一步操作，恢复 %d 个动态模块。", len(payload.DynamicSections)), nil
+
+	case "restore_dynamic_section_visibility":
+		if len(payload.DynamicSections) == 0 {
+			return "撤销失败：缺少动态模块快照。", fmt.Errorf("undo dynamic section snapshot missing")
+		}
+		for _, section := range payload.DynamicSections {
+			if strings.TrimSpace(section.ID) == "" {
+				continue
+			}
+			if _, err := s.store.SetDynamicSectionVisibility(ctx, meetingID, section.ID, section.Visibility); err != nil {
+				return "撤销动态模块展示状态失败。", err
+			}
+		}
+		return fmt.Sprintf("已撤销上一步操作，恢复 %d 个动态模块的展示状态。", len(payload.DynamicSections)), nil
+
+	case "restore_framework_section":
+		if payload.FrameworkSection == nil {
+			return "撤销失败：缺少会议框架模块快照。", fmt.Errorf("undo framework section snapshot missing")
+		}
+		payload.FrameworkSection.MeetingID = meetingID
+		section, err := s.store.RestoreFrameworkSection(ctx, *payload.FrameworkSection)
+		if err != nil {
+			return "撤销会议框架模块变更失败。", err
+		}
+		return fmt.Sprintf("已撤销上一步操作，恢复框架模块：%s", section.Title), nil
+
+	case "restore_summary":
+		if payload.Summary == nil {
+			return "撤销失败：缺少摘要快照。", fmt.Errorf("undo summary snapshot missing")
+		}
+		payload.Summary.MeetingID = meetingID
+		summary, err := s.store.RestoreSummary(ctx, *payload.Summary)
+		if err != nil {
+			return "撤销摘要变更失败。", err
+		}
+		return fmt.Sprintf("已撤销上一步操作，恢复会议摘要，当前长度 %d 字。", len([]rune(summary.Content))), nil
 
 	default:
 		return "这一步操作暂时不支持撤销。", fmt.Errorf("unsupported undo payload type: %s", payload.Type)

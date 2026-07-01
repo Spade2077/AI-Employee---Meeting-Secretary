@@ -223,6 +223,9 @@ func TestInteractionCommandExecutionCoversSupportedIntents(t *testing.T) {
 	if len(decisions) != 1 || !strings.Contains(decisions[0].Content, "Volcano ASR") {
 		t.Fatalf("expected moved decision, got %#v", decisions)
 	}
+	if !strings.HasPrefix(decisions[0].SourceText, "待办：") || !strings.Contains(decisions[0].SourceText, "Investigate ASR connection keepalive") {
+		t.Fatalf("expected moved decision source to mention original action item, got %q", decisions[0].SourceText)
+	}
 
 	mergeOne, err := store.CreateActionItem(ctx, meetingID, ActionItemMutation{Task: "Draft launch email", Owner: "Carol"})
 	if err != nil {
@@ -294,6 +297,22 @@ func TestInteractionCommandExecutionCoversSupportedIntents(t *testing.T) {
 		!strings.Contains(snapshot.Summary.Content, "缺失项提醒") {
 		t.Fatalf("expected section rewrite to preserve summary context, got %#v", snapshot.Summary)
 	}
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "undo_last_interaction",
+		TargetType: "interaction",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = store.GetIntelligenceSnapshot(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Summary == nil ||
+		!strings.Contains(snapshot.Summary.Content, "报名人数") ||
+		strings.Contains(snapshot.Summary.Content, "人员时间冲突") {
+		t.Fatalf("expected summary undo to restore previous content, got %#v", snapshot.Summary)
+	}
 }
 
 func TestInteractionUpdateMeetingTitleAndUndo(t *testing.T) {
@@ -353,6 +372,101 @@ func TestParseMeetingTitleLocally(t *testing.T) {
 	command = normalizeInteractionCommand(command)
 	if command.Title != "客户试点复盘会" {
 		t.Fatalf("expected polite suffix to be removed, got %#v", command)
+	}
+}
+
+func TestParseCorrectionLocally(t *testing.T) {
+	command, ok := parseCorrectionLocally("不是新增一勾，是新增一个供应商限制模块")
+	if !ok {
+		t.Fatal("expected correction parser to match not-a-but-b phrase")
+	}
+	if command.Intent != "correct_last_interaction" || command.Content != "新增一个供应商限制模块" {
+		t.Fatalf("unexpected correction command: %#v", command)
+	}
+
+	command, ok = parseCorrectionLocally("刚才说错了，应该删除第二条待办")
+	if !ok {
+		t.Fatal("expected correction parser to match spoken mistake phrase")
+	}
+	if command.Content != "删除第二条待办" {
+		t.Fatalf("unexpected corrected instruction: %#v", command)
+	}
+}
+
+func TestCorrectionInteractionUndoAndReplay(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	if _, err := store.SaveLLMConfigFor(ctx, LLMUseCaseInteraction, LLMConfig{BaseURL: "https://llm.example/v1", Model: "test-model"}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		store: store,
+		hub:   NewHub(),
+		llmClient: fakeLLMClient{content: `{
+			"intent": "create_action_item",
+			"target_type": "action_item",
+			"task": "Check booth network before rehearsal",
+			"confidence": 0.95,
+			"need_confirm": false,
+			"reply": "ok"
+		}`},
+	}
+
+	_, _, err := server.executeInteractionCommandWithEventID(ctx, meetingID, InteractionCommand{
+		Intent:     "create_action_item",
+		TargetType: "action_item",
+		Task:       "Wrong temporary task",
+	}, "ie_wrong")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, message, correctedCommand, _, err := server.executeCorrectionInteraction(
+		ctx,
+		meetingID,
+		"ie_correct",
+		"刚才说错了，应该新增检查展台网络的待办",
+		"新增检查展台网络的待办",
+		newInteractionTiming(interactionTimingSeed{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if correctedCommand.Intent != "create_action_item" || !strings.Contains(message, "已纠正口误") {
+		t.Fatalf("expected correction to replay create action item, got command=%#v message=%q", correctedCommand, message)
+	}
+	if snapshot == nil {
+		t.Fatal("expected correction snapshot")
+	}
+	items, err := store.ListActionItems(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundCorrected := false
+	for _, item := range items {
+		if item.Task == "Wrong temporary task" {
+			t.Fatalf("expected mistaken item to be deleted, got %#v", items)
+		}
+		if item.Task == "Check booth network before rehearsal" {
+			foundCorrected = true
+		}
+	}
+	if !foundCorrected {
+		t.Fatalf("expected corrected item to be created, got %#v", items)
+	}
+
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{Intent: "undo_last_interaction", TargetType: "interaction"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err = store.ListActionItems(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.Task == "Check booth network before rehearsal" {
+			t.Fatalf("expected undo after correction to remove corrected item, got %#v", items)
+		}
 	}
 }
 
@@ -819,6 +933,899 @@ func TestUndoUpdateDecisionInteraction(t *testing.T) {
 	}
 }
 
+func TestUndoActionItemMergeAndMoveToDecision(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	moveTarget, err := store.CreateActionItem(ctx, meetingID, ActionItemMutation{Task: "Confirm demo network route", Owner: "Alice", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = server.executeInteractionCommandWithEventID(ctx, meetingID, InteractionCommand{
+		Intent:     "move_action_item_to_decision",
+		TargetType: "action_item",
+		TargetID:   moveTarget.ID,
+		Content:    "Use the wired route for the demo network.",
+	}, "ie_move_action")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := store.ListDecisions(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) != 1 || !strings.Contains(decisions[0].Content, "wired route") {
+		t.Fatalf("expected moved action item decision, got %#v", decisions)
+	}
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{Intent: "undo_last_interaction", TargetType: "interaction"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.ListActionItems(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundOriginal := false
+	for _, item := range items {
+		if item.ID == moveTarget.ID && item.Task == moveTarget.Task && !item.IsDeleted {
+			foundOriginal = true
+		}
+	}
+	if !foundOriginal {
+		t.Fatalf("expected moved action item to be restored, got %#v", items)
+	}
+	decisions, err = store.ListDecisions(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) != 0 {
+		t.Fatalf("expected created decision to be removed by undo, got %#v", decisions)
+	}
+
+	mergeOne, err := store.CreateActionItem(ctx, meetingID, ActionItemMutation{Task: "Prepare rehearsal laptop", Owner: "Bob", Status: "completed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergeTwo, err := store.CreateActionItem(ctx, meetingID, ActionItemMutation{Task: "Prepare HDMI adapter", Owner: "Carol", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = server.executeInteractionCommandWithEventID(ctx, meetingID, InteractionCommand{
+		Intent:    "merge_action_items",
+		SourceIDs: []string{mergeOne.ID, mergeTwo.ID},
+		Task:      "Prepare rehearsal devices",
+	}, "ie_merge_action")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{Intent: "undo_last_interaction", TargetType: "interaction"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err = store.ListActionItems(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundOne := false
+	foundTwo := false
+	for _, item := range items {
+		if item.ID == mergeOne.ID && item.Task == mergeOne.Task && item.Status == mergeOne.Status {
+			foundOne = true
+		}
+		if item.ID == mergeTwo.ID && item.Task == mergeTwo.Task && item.Status == mergeTwo.Status {
+			foundTwo = true
+		}
+	}
+	if !foundOne || !foundTwo {
+		t.Fatalf("expected merged action items to be restored, got %#v", items)
+	}
+}
+
+func TestUndoDecisionMergeAndMoveToActionItem(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	first, err := store.CreateDecision(ctx, meetingID, "Use cloud ASR in the demo.", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.CreateDecision(ctx, meetingID, "Keep interaction parsing separate.", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = server.executeInteractionCommandWithEventID(ctx, meetingID, InteractionCommand{
+		Intent:    "merge_decisions",
+		SourceIDs: []string{first.ID, second.ID},
+	}, "ie_merge_decision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{Intent: "undo_last_interaction", TargetType: "interaction"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := store.ListDecisions(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundFirst := false
+	foundSecond := false
+	for _, decision := range decisions {
+		if decision.ID == first.ID && decision.Content == first.Content {
+			foundFirst = true
+		}
+		if decision.ID == second.ID && decision.Content == second.Content {
+			foundSecond = true
+		}
+	}
+	if !foundFirst || !foundSecond {
+		t.Fatalf("expected merged decisions to be restored, got %#v", decisions)
+	}
+
+	_, _, err = server.executeInteractionCommandWithEventID(ctx, meetingID, InteractionCommand{
+		Intent:     "move_decision_to_action_item",
+		TargetType: "decision",
+		TargetID:   first.ID,
+		Task:       "Evaluate cloud ASR demo result",
+		Owner:      "Dana",
+	}, "ie_move_decision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{Intent: "undo_last_interaction", TargetType: "interaction"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisions, err = store.ListDecisions(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundFirst = false
+	for _, decision := range decisions {
+		if decision.ID == first.ID && decision.Content == first.Content {
+			foundFirst = true
+		}
+	}
+	if !foundFirst {
+		t.Fatalf("expected moved decision to be restored, got %#v", decisions)
+	}
+	items, err := store.ListActionItems(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.Task == "Evaluate cloud ASR demo result" {
+			t.Fatalf("expected action item created by move to be removed, got %#v", items)
+		}
+	}
+}
+
+func TestInteractionCommandControlsDynamicSections(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	snapshot, err := store.SaveIntelligenceExtraction(ctx, meetingID, IntelligenceExtraction{
+		DynamicSections: []DynamicSectionExtraction{{
+			SectionKey:  "budget_constraints",
+			Title:       "Budget Constraints",
+			Description: "Budget constraints discussed in the meeting.",
+			Items: []DynamicSectionItemExtraction{{
+				Title:   "Demo budget ceiling",
+				Content: "The demo budget should stay below 80,000 yuan.",
+			}},
+		}},
+	}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 1 || snapshot.DynamicSections[0].Visibility != "visible" {
+		t.Fatalf("expected visible dynamic section, got %#v", snapshot.DynamicSections)
+	}
+
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:       "show_dynamic_section",
+		TargetType:   "dynamic_section",
+		SectionTitle: "Budget Constraints",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 1 || snapshot.DynamicSections[0].Visibility != "visible" {
+		t.Fatalf("expected dynamic section to become visible, got %#v", snapshot.DynamicSections)
+	}
+
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "hide_all_dynamic_sections",
+		TargetType: "dynamic_section",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.DynamicSections[0].Visibility != "hidden" {
+		t.Fatalf("expected dynamic section to become hidden, got %#v", snapshot.DynamicSections[0])
+	}
+
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "undo_last_interaction",
+		TargetType: "interaction",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.DynamicSections[0].Visibility != "visible" {
+		t.Fatalf("expected undo to restore visible dynamic section, got %#v", snapshot.DynamicSections[0])
+	}
+}
+
+func TestInteractionCommandCreatesDynamicSectionAndUndo(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	snapshot, _, err := server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:       "create_dynamic_section",
+		TargetType:   "dynamic_section",
+		SectionTitle: "Budget Constraints",
+		Content:      "Cloud service cost must stay below 5,000 yuan this month.",
+		Instruction:  "Create a budget constraints module.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 1 {
+		t.Fatalf("expected one dynamic section, got %#v", snapshot.DynamicSections)
+	}
+	section := snapshot.DynamicSections[0]
+	if section.Title != "Budget Constraints" || section.Source != "user" || section.Visibility != "visible" {
+		t.Fatalf("expected visible user dynamic section, got %#v", section)
+	}
+	if len(section.Items) != 1 || !strings.Contains(section.Items[0].Content, "5,000") {
+		t.Fatalf("expected initial dynamic section item, got %#v", section.Items)
+	}
+
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:       "add_dynamic_section_item",
+		TargetType:   "dynamic_section",
+		TargetID:     section.ID,
+		SectionTitle: section.Title,
+		Content:      "Hardware purchase budget should stay below 20,000 yuan.",
+		Instruction:  "Add one item to the budget constraints module.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 1 || len(snapshot.DynamicSections[0].Items) != 2 {
+		t.Fatalf("expected appended dynamic section item, got %#v", snapshot.DynamicSections)
+	}
+	section = snapshot.DynamicSections[0]
+
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:       "update_dynamic_section",
+		TargetType:   "dynamic_section",
+		TargetID:     section.ID,
+		SectionTitle: section.Title,
+		Content:      "Track budget limits, approval owners, and exception rules.",
+		Instruction:  "Update the budget constraints module description.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(snapshot.DynamicSections[0].Description, "approval owners") {
+		t.Fatalf("expected dynamic section description to update, got %#v", snapshot.DynamicSections[0])
+	}
+
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "undo_last_interaction",
+		TargetType: "interaction",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(snapshot.DynamicSections[0].Description, "approval owners") {
+		t.Fatalf("expected undo to restore dynamic section description, got %#v", snapshot.DynamicSections[0])
+	}
+
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:        "update_dynamic_section_item",
+		TargetType:    "dynamic_section",
+		TargetID:      section.ID,
+		SectionTitle:  section.Title,
+		SourceIndices: []int{2},
+		Content:       "Hardware purchase budget must stay below 18,000 yuan.",
+		Instruction:   "Update the second item in the budget constraints module.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(snapshot.DynamicSections[0].Items[1].Content, "18,000") {
+		t.Fatalf("expected dynamic section item to update, got %#v", snapshot.DynamicSections[0].Items)
+	}
+
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "undo_last_interaction",
+		TargetType: "interaction",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(snapshot.DynamicSections[0].Items[1].Content, "20,000") {
+		t.Fatalf("expected undo to restore dynamic section item, got %#v", snapshot.DynamicSections[0].Items)
+	}
+
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "undo_last_interaction",
+		TargetType: "interaction",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 1 || len(snapshot.DynamicSections[0].Items) != 1 {
+		t.Fatalf("expected undo to remove appended item, got %#v", snapshot.DynamicSections)
+	}
+
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "undo_last_interaction",
+		TargetType: "interaction",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 0 {
+		t.Fatalf("expected undo to remove created dynamic section, got %#v", snapshot.DynamicSections)
+	}
+}
+
+func TestLocalDynamicSectionParserDoesNotTreatAddOneItemAsFirstModule(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	if _, err := store.CreateDynamicSection(ctx, meetingID, "预算约束", "", "记录预算边界", "云服务费用先控制在三千以内", "test"); err != nil {
+		t.Fatal(err)
+	}
+	supplier, err := store.CreateDynamicSection(ctx, meetingID, "供应商限制", "", "记录供应商侧限制", "临时采购需要主管确认", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	command, _, err := server.parseInteractionCommand(ctx, meetingID, "给供应商限制模块补充一条，摄像头到货时间最晚不能超过周三", newInteractionTiming(interactionTimingSeed{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Intent != "add_dynamic_section_item" {
+		t.Fatalf("expected add dynamic section item intent, got %#v", command)
+	}
+	if command.TargetID != supplier.ID {
+		t.Fatalf("expected supplier module target %s, got %#v", supplier.ID, command)
+	}
+	if strings.Contains(command.Content, "补充一条") || !strings.Contains(command.Content, "摄像头到货时间") {
+		t.Fatalf("expected only appended content, got %#v", command)
+	}
+
+	snapshot, _, err := server.executeInteractionCommand(ctx, meetingID, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 2 {
+		t.Fatalf("expected two dynamic sections, got %#v", snapshot.DynamicSections)
+	}
+	if len(snapshot.DynamicSections[0].Items) != 1 {
+		t.Fatalf("expected first module to stay unchanged, got %#v", snapshot.DynamicSections[0])
+	}
+	if len(snapshot.DynamicSections[1].Items) != 2 || !strings.Contains(snapshot.DynamicSections[1].Items[1].Content, "摄像头到货时间") {
+		t.Fatalf("expected supplier module to receive item, got %#v", snapshot.DynamicSections[1])
+	}
+}
+
+func TestInteractionCommandDeletesAndMergesDynamicSections(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	first, err := store.CreateDynamicSection(ctx, meetingID, "预算约束", "", "记录预算边界", "云服务费用先控制在三千以内", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.CreateDynamicSection(ctx, meetingID, "供应商限制", "", "记录供应商侧限制", "临时采购需要主管确认", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := store.CreateDynamicSection(ctx, meetingID, "客户关注点", "", "记录客户侧重点", "客户更关注离线演示稳定性", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	command, _, err := server.parseInteractionCommand(ctx, meetingID, "删除第 3 个动态模块", newInteractionTiming(interactionTimingSeed{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Intent != "delete_dynamic_section" || command.TargetID != third.ID {
+		t.Fatalf("expected delete third dynamic section command, got %#v", command)
+	}
+	snapshot, _, err := server.executeInteractionCommand(ctx, meetingID, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 2 {
+		t.Fatalf("expected one dynamic section deleted, got %#v", snapshot.DynamicSections)
+	}
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{Intent: "undo_last_interaction", TargetType: "interaction"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 3 {
+		t.Fatalf("expected dynamic section delete undo to restore 3 sections, got %#v", snapshot.DynamicSections)
+	}
+
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:        "merge_dynamic_sections",
+		TargetType:    "dynamic_section",
+		SourceIDs:     []string{first.ID, second.ID},
+		SectionTitle:  "预算与供应商限制",
+		Content:       "统一记录预算边界和供应商审批限制。",
+		Instruction:   "合并预算约束和供应商限制模块。",
+		SourceIndices: []int{1, 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 2 {
+		t.Fatalf("expected merged dynamic sections, got %#v", snapshot.DynamicSections)
+	}
+	merged := snapshot.DynamicSections[0]
+	if merged.Title != "预算与供应商限制" || len(merged.Items) != 2 {
+		t.Fatalf("expected merged section with two items, got %#v", merged)
+	}
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{Intent: "undo_last_interaction", TargetType: "interaction"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 3 {
+		t.Fatalf("expected dynamic section merge undo to restore 3 sections, got %#v", snapshot.DynamicSections)
+	}
+}
+
+func TestDynamicSectionVoiceSourceTextIsGeneric(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	section, err := store.CreateDynamicSection(ctx, meetingID, "供应商限制", "", "记录供应商侧限制", "", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _, err := server.executeInteractionCommandWithEventID(ctx, meetingID, InteractionCommand{
+		Intent:       "add_dynamic_section_item",
+		TargetType:   "dynamic_section",
+		TargetID:     section.ID,
+		SectionTitle: section.Title,
+		Content:      "摄像头到货时间最晚不能超过周三",
+		Instruction:  "给供应商限制模块补充一条，摄像头到货时间最晚不能超过周三",
+	}, "ie_voice_source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 1 || len(snapshot.DynamicSections[0].Items) != 1 {
+		t.Fatalf("expected one dynamic item, got %#v", snapshot.DynamicSections)
+	}
+	if snapshot.DynamicSections[0].Items[0].SourceText != dynamicSectionVoiceSourceText {
+		t.Fatalf("expected generic voice source text, got %#v", snapshot.DynamicSections[0].Items[0])
+	}
+}
+
+func TestLocalRiskMutationParserUsesRequestedIndex(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	if _, err := store.CreateRisk(ctx, meetingID, RiskMutation{Content: "Backup power may be insufficient", Status: "open"}); err != nil {
+		t.Fatal(err)
+	}
+	command, _, err := server.parseInteractionCommand(ctx, meetingID, "修改第一条风险的方案，改成提前准备备用麦克风并安排现场复测", newInteractionTiming(interactionTimingSeed{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Intent != "update_risk" || command.TargetIndex != 1 || command.Mitigation == "" {
+		t.Fatalf("expected local risk mitigation update for first risk, got %#v", command)
+	}
+	snapshot, _, err := server.executeInteractionCommand(ctx, meetingID, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(snapshot.Risks[0].Mitigation, "备用麦克风") {
+		t.Fatalf("expected first risk mitigation to change, got %#v", snapshot.Risks)
+	}
+	if snapshot.Risks[2].Mitigation != "" {
+		t.Fatalf("expected third risk to stay unchanged, got %#v", snapshot.Risks[2])
+	}
+}
+
+func TestLocalOpenQuestionParserBeatsRiskFallback(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	if _, err := store.CreateOpenQuestion(ctx, meetingID, OpenQuestionMutation{Question: "客户是否允许现场录音留存", Status: "open"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateOpenQuestion(ctx, meetingID, OpenQuestionMutation{Question: "第四条确认问题是否需要法务复核", Status: "open"}); err != nil {
+		t.Fatal(err)
+	}
+
+	command, _, err := server.parseInteractionCommand(ctx, meetingID, "把第四条待确认问题的截止时间改为周三下午。", newInteractionTiming(interactionTimingSeed{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Intent != "update_open_question" || command.TargetType != "open_question" || command.TargetIndex != 4 || command.DueDate != "周三下午" {
+		t.Fatalf("expected local open question due date update, got %#v", command)
+	}
+	snapshot, _, err := server.executeInteractionCommand(ctx, meetingID, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.OpenQuestions) < 4 || snapshot.OpenQuestions[3].DueDate != "周三下午" {
+		t.Fatalf("expected fourth open question due date to change, got %#v", snapshot.OpenQuestions)
+	}
+	for _, risk := range snapshot.Risks {
+		if risk.DueDate == "周三下午" {
+			t.Fatalf("expected risks to stay unchanged, got %#v", snapshot.Risks)
+		}
+	}
+}
+
+func TestConciseSummaryCommandActuallyShortensSummary(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	longSummary := "会议摘要：本次会议围绕展会现场演示准备展开，重点讨论了转写稳定性、网络权限、现场设备、演示流程和会中交互展示方式。风险提示：麦克风底噪、现场网络限制和设备到货时间都可能影响演示。缺失项提醒：部分任务还缺负责人和截止时间，需要在会后继续确认。下一步：团队需要完成现场联调、演示脚本确认和备用方案准备。"
+	if _, err := store.RewriteSummary(ctx, meetingID, longSummary); err != nil {
+		t.Fatal(err)
+	}
+	command, _, err := server.parseInteractionCommand(ctx, meetingID, "把摘要改的简短一点", newInteractionTiming(interactionTimingSeed{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Intent != "rewrite_summary_section" || !commandRequestsConciseSummary(command) {
+		t.Fatalf("expected concise summary command, got %#v", command)
+	}
+	snapshot, _, err := server.executeInteractionCommand(ctx, meetingID, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Summary == nil || len([]rune(snapshot.Summary.Content)) >= len([]rune(longSummary)) {
+		t.Fatalf("expected shorter summary, got %#v", snapshot.Summary)
+	}
+	if strings.Contains(snapshot.Summary.Content, "精简摘要") {
+		t.Fatalf("expected generated concise summary instead of instruction text, got %q", snapshot.Summary.Content)
+	}
+}
+
+func TestPlaceholderStructuredItemsAreReplacedByConcreteItems(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+
+	if _, err := store.SaveIntelligenceExtraction(ctx, meetingID, IntelligenceExtraction{
+		ActionItems:   []ActionItemExtraction{{Task: "补充一条现场网络待办", Status: "open"}},
+		Risks:         []RiskExtraction{{Content: "补充一条麦克风风险", Status: "open"}},
+		OpenQuestions: []OpenQuestionExtraction{{Question: "补充一条客户确认问题", Status: "open"}},
+	}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveIntelligenceExtraction(ctx, meetingID, IntelligenceExtraction{
+		ActionItems: []ActionItemExtraction{{
+			Task:    "现场网络由赵强在周三下午完成权限验证",
+			Owner:   "赵强",
+			DueDate: "周三下午",
+			Status:  "open",
+		}},
+		Risks: []RiskExtraction{{
+			Content:    "麦克风底噪可能影响老板演示",
+			Mitigation: "提前准备备用麦克风并现场复测",
+			Status:     "open",
+		}},
+		OpenQuestions: []OpenQuestionExtraction{{
+			Question: "客户是否允许现场录音留存",
+			DueDate:  "周三下午",
+			Status:   "open",
+		}},
+	}, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.GetIntelligenceSnapshot(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsActionTask(snapshot.ActionItems, "补充一条现场网络待办") ||
+		containsRiskContent(snapshot.Risks, "补充一条麦克风风险") ||
+		containsOpenQuestion(snapshot.OpenQuestions, "补充一条客户确认问题") {
+		t.Fatalf("expected placeholder items to be replaced, got %#v", snapshot)
+	}
+	if !containsActionTask(snapshot.ActionItems, "现场网络由赵强在周三下午完成权限验证") ||
+		!containsRiskContent(snapshot.Risks, "麦克风底噪可能影响老板演示") ||
+		!containsOpenQuestion(snapshot.OpenQuestions, "客户是否允许现场录音留存") {
+		t.Fatalf("expected concrete items to be kept, got %#v", snapshot)
+	}
+}
+
+func TestDynamicSectionDeleteUndoRestoresAllItems(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	section, err := store.CreateDynamicSection(ctx, meetingID, "供应商限制", "", "记录供应商限制", "", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AddDynamicSectionItem(ctx, meetingID, section.ID, "", "临时设备采购费用不能超过三千", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AddDynamicSectionItem(ctx, meetingID, section.ID, "", "摄像头到货时间最晚不能超过周三", "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, _, err := server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:      "delete_dynamic_section",
+		TargetType:  "dynamic_section",
+		TargetID:    section.ID,
+		TargetIndex: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 0 {
+		t.Fatalf("expected dynamic section to be deleted, got %#v", snapshot.DynamicSections)
+	}
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{Intent: "undo_last_interaction", TargetType: "interaction"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 1 || len(snapshot.DynamicSections[0].Items) != 2 {
+		t.Fatalf("expected undo to restore dynamic section with two items, got %#v", snapshot.DynamicSections)
+	}
+}
+
+func TestDynamicSectionPlaceholderItemIsUpdatedInPlace(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+
+	section, err := store.CreateDynamicSection(ctx, meetingID, "预算限制", "", "记录预算约束", "", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AddDynamicSectionItem(ctx, meetingID, section.ID, "", "给预算限制模块补充一条", dynamicSectionVoiceSourceText); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AddDynamicSectionItem(ctx, meetingID, section.ID, "", "临时设备采购费用不能超过3,000", dynamicSectionVoiceSourceText); err != nil {
+		t.Fatal(err)
+	}
+	sections, err := store.ListDynamicSections(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sections) != 1 || len(sections[0].Items) != 1 || !strings.Contains(sections[0].Items[0].Content, "3,000") {
+		t.Fatalf("expected placeholder dynamic item to be updated in place, got %#v", sections)
+	}
+}
+
+func TestInteractionCommandUpdatesFrameworkSections(t *testing.T) {
+	if !meetingFrameworkFeatureEnabled() {
+		t.Skip("meeting framework feature is temporarily disabled")
+	}
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	if _, err := store.UpdateMeetingType(ctx, meetingID, "project_followup", true); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, message, err := server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:       "update_framework_section",
+		TargetType:   "framework_section",
+		SectionTitle: "当前进展",
+		Content:      "实时转写已经稳定，结构化提取还在优化。",
+		Instruction:  "小艾小艾，把当前进展改成实时转写已经稳定，结构化提取还在优化。",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(message, "已更新") {
+		t.Fatalf("expected update message, got %q", message)
+	}
+	progress := findFrameworkSection(snapshot.FrameworkSections, "current_progress")
+	if progress == nil || !strings.Contains(progress.Content, "实时转写") || !progress.Locked {
+		t.Fatalf("expected current progress to be updated and locked, got %#v", progress)
+	}
+
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:      "append_framework_section",
+		TargetType:  "framework_section",
+		SectionKey:  "current_progress",
+		Content:     "本周重点是验证会中交互链路。",
+		Instruction: "小艾小艾，补充当前进展，本周重点是验证会中交互链路。",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress = findFrameworkSection(snapshot.FrameworkSections, "current_progress")
+	if progress == nil || !strings.Contains(progress.Content, "实时转写") || !strings.Contains(progress.Content, "会中交互") {
+		t.Fatalf("expected current progress to include appended content, got %#v", progress)
+	}
+
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:       "clear_framework_section",
+		TargetType:   "framework_section",
+		SectionTitle: "当前进展",
+		Instruction:  "小艾小艾，清空当前进展。",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress = findFrameworkSection(snapshot.FrameworkSections, "current_progress")
+	if progress == nil || progress.Content != "" || !progress.Locked {
+		t.Fatalf("expected current progress to be cleared and locked, got %#v", progress)
+	}
+
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "undo_last_interaction",
+		TargetType: "interaction",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress = findFrameworkSection(snapshot.FrameworkSections, "current_progress")
+	if progress == nil || !strings.Contains(progress.Content, "会中交互") {
+		t.Fatalf("expected undo to restore appended current progress, got %#v", progress)
+	}
+}
+
+func TestLocalFrameworkSectionParserCoversMeetingTypes(t *testing.T) {
+	if !meetingFrameworkFeatureEnabled() {
+		t.Skip("meeting framework feature is temporarily disabled")
+	}
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	cases := []struct {
+		meetingType   string
+		instruction   string
+		wantIntent    string
+		wantKey       string
+		wantContent   string
+		wantNoContent bool
+	}{
+		{
+			meetingType: "exploration",
+			instruction: "把核心问题改成是否把会中交互作为正式版主卖点",
+			wantIntent:  "update_framework_section",
+			wantKey:     "core_question",
+			wantContent: "是否把会中交互作为正式版主卖点",
+		},
+		{
+			meetingType: "exploration",
+			instruction: "补充支持理由，语音修改比手动编辑更适合会议现场",
+			wantIntent:  "append_framework_section",
+			wantKey:     "supporting_reasons",
+			wantContent: "语音修改比手动编辑更适合会议现场",
+		},
+		{
+			meetingType: "retrospective",
+			instruction: "重写可沉淀经验为演示前要提前锁定网络、麦克风和模型配置",
+			wantIntent:  "rewrite_framework_section",
+			wantKey:     "lessons_learned",
+			wantContent: "演示前要提前锁定网络、麦克风和模型配置",
+		},
+		{
+			meetingType:   "retrospective",
+			instruction:   "清空暴露的问题",
+			wantIntent:    "clear_framework_section",
+			wantKey:       "exposed_problems",
+			wantNoContent: true,
+		},
+		{
+			meetingType: "general",
+			instruction: "未解决问题：二维码公网访问策略还没有定",
+			wantIntent:  "update_framework_section",
+			wantKey:     "unresolved_issues",
+			wantContent: "二维码公网访问策略还没有定",
+		},
+	}
+
+	for _, tc := range cases {
+		if _, err := store.UpdateMeetingType(ctx, meetingID, tc.meetingType, true); err != nil {
+			t.Fatal(err)
+		}
+		command, _, err := server.parseInteractionCommand(ctx, meetingID, tc.instruction, newInteractionTiming(interactionTimingSeed{}))
+		if err != nil {
+			t.Fatalf("%s parse failed: %v", tc.instruction, err)
+		}
+		if command.Intent != tc.wantIntent || command.TargetType != "framework_section" || command.SectionKey != tc.wantKey {
+			t.Fatalf("unexpected command for %q: %#v", tc.instruction, command)
+		}
+		if tc.wantNoContent {
+			if command.Content != "" {
+				t.Fatalf("expected empty content for %q, got %q", tc.instruction, command.Content)
+			}
+			continue
+		}
+		if command.Content != tc.wantContent {
+			t.Fatalf("unexpected content for %q: got %q want %q", tc.instruction, command.Content, tc.wantContent)
+		}
+	}
+}
+
+func TestInteractionCommandUpdatesNewMeetingTypeFrameworkSections(t *testing.T) {
+	if !meetingFrameworkFeatureEnabled() {
+		t.Skip("meeting framework feature is temporarily disabled")
+	}
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	cases := []struct {
+		meetingType string
+		title       string
+		content     string
+		key         string
+	}{
+		{"exploration", "已提出想法", "先做固定命令，再把复杂请求交给工具编排。", "proposed_ideas"},
+		{"retrospective", "改进方案", "演示前增加设备自检和配置校验。", "improvement_plan"},
+		{"general", "关键观点", "会议助手要让老板看见系统正在工作。", "key_points"},
+	}
+	for _, tc := range cases {
+		if _, err := store.UpdateMeetingType(ctx, meetingID, tc.meetingType, true); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, _, err := server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+			Intent:       "update_framework_section",
+			TargetType:   "framework_section",
+			SectionTitle: tc.title,
+			Content:      tc.content,
+			Instruction:  "本地测试框架模块更新",
+		})
+		if err != nil {
+			t.Fatalf("update %s %s failed: %v", tc.meetingType, tc.title, err)
+		}
+		section := findFrameworkSection(snapshot.FrameworkSections, tc.key)
+		if section == nil || section.Content != tc.content || !section.Locked {
+			t.Fatalf("expected updated locked framework section, got %#v", section)
+		}
+	}
+}
+
+func containsActionTask(items []MeetingActionItem, text string) bool {
+	for _, item := range items {
+		if strings.Contains(item.Task, text) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsRiskContent(risks []MeetingRisk, text string) bool {
+	for _, risk := range risks {
+		if strings.Contains(risk.Content, text) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsOpenQuestion(questions []MeetingOpenQuestion, text string) bool {
+	for _, question := range questions {
+		if strings.Contains(question.Question, text) {
+			return true
+		}
+	}
+	return false
+}
+
 func newInteractionStore(t *testing.T, ctx context.Context) (*Store, string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
@@ -837,7 +1844,7 @@ func newInteractionStore(t *testing.T, ctx context.Context) (*Store, string) {
 		t.Fatal(err)
 	}
 	_, err = store.SaveIntelligenceExtraction(ctx, meeting.ID, IntelligenceExtraction{
-		Summary: "Initial summary.",
+		Summary: SummaryExtraction{Brief: "Initial summary."},
 		ActionItems: []ActionItemExtraction{
 			{Task: "Prepare meeting materials", Owner: "Zhang San", Status: "open"},
 			{Task: "Book meeting room", Owner: "Li Si", Status: "open"},

@@ -11,6 +11,8 @@ const EMPTY_SNAPSHOT = {
   actionItems: [],
   risks: [],
   openQuestions: [],
+  frameworkSections: [],
+  dynamicSections: [],
   missingFieldAlerts: []
 };
 
@@ -21,8 +23,17 @@ const VIEW_LABELS = {
 
 const VIEW_HINTS = {
   live: "当前主屏聚焦实时转写和会议摘要，结构化内容仍在后台持续更新。",
-  summary: "会议总结页展示待办、决策、风险和待确认问题。"
+  summary: "会议总结页展示待办、决策、风险、待确认问题和按需发现的动态模块。"
 };
+
+const MEETING_FRAMEWORK_UI_ENABLED = false;
+
+const MEETING_TYPE_OPTIONS = [
+  { value: "project_followup", label: "项目推进会" },
+  { value: "exploration", label: "探索讨论会" },
+  { value: "retrospective", label: "复盘总结会" },
+  { value: "general", label: "普通会议" }
+];
 
 const STATUS_LABELS = {
   standby: "待开始",
@@ -33,17 +44,23 @@ const STATUS_LABELS = {
 };
 
 const INTERACTION_STEPS = [
-  { key: "received", label: "语音指令识别" },
-  { key: "understanding", label: "LLM 理解中" },
-  { key: "executing", label: "工具执行中" },
-  { key: "completed", label: "执行完成" }
+  { key: "received", label: "语音指令识别中", detail: "等待唤醒词与指令文本" },
+  { key: "understanding", label: "LLM 理解中", detail: "解析意图与参数" },
+  { key: "executing", label: "工具执行中", detail: "调用后端会议工具" },
+  { key: "completed", label: "执行完成", detail: "同步结果与耗时" }
 ];
 
+const ITEM_MOTION_MS = 9600;
+const DELETE_MOTION_MS = 6200;
+const MODAL_TRANSITION_MS = 420;
+
 const INSIGHT_COLLECTIONS = [
+  ...(MEETING_FRAMEWORK_UI_ENABLED ? [{ key: "frameworkSections" }] : []),
   { key: "actionItems" },
   { key: "decisions" },
   { key: "risks" },
-  { key: "openQuestions" }
+  { key: "openQuestions" },
+  { key: "dynamicSections" }
 ];
 
 function parseRouteMeetingID() {
@@ -62,12 +79,74 @@ function normalizeSnapshot(snapshot) {
   const merged = { ...EMPTY_SNAPSHOT, ...(snapshot || {}) };
   return {
     ...merged,
+    summary: normalizeSummary(merged.summary),
     decisions: visibleItems(merged.decisions),
     actionItems: visibleItems(merged.actionItems),
     risks: visibleItems(merged.risks),
     openQuestions: visibleItems(merged.openQuestions),
+    frameworkSections: normalizeFrameworkSections(merged.frameworkSections),
+    dynamicSections: normalizeDynamicSections(merged.dynamicSections),
     missingFieldAlerts: Array.isArray(merged.missingFieldAlerts) ? merged.missingFieldAlerts : []
   };
+}
+
+function normalizeSummary(summary) {
+  if (!summary) return null;
+  const keyPoints = Array.isArray(summary.keyPoints)
+    ? summary.keyPoints
+    : Array.isArray(summary.key_points)
+      ? summary.key_points
+      : [];
+  const changes = Array.isArray(summary.changes) ? summary.changes : [];
+  const content = String(summary.content || "").trim();
+  const brief = String(summary.brief || content || "").trim();
+  return {
+    ...summary,
+    content,
+    brief,
+    background: String(summary.background || "").trim(),
+    keyPoints: keyPoints.map((item) => String(item || "").trim()).filter(Boolean),
+    progress: String(summary.progress || "").trim(),
+    changes: changes.map((item) => String(item || "").trim()).filter(Boolean),
+    conclusion: String(summary.conclusion || "").trim(),
+    nextFollowUp: String(summary.nextFollowUp || summary.next_follow_up || "").trim()
+  };
+}
+
+function summaryText(summary) {
+  if (!summary) return "";
+  return summary.brief || summary.content || summary.conclusion || summary.progress || summary.keyPoints?.[0] || "";
+}
+
+function hasStructuredSummary(summary) {
+  if (!summary) return false;
+  return Boolean(
+    summary.background ||
+    summary.progress ||
+    summary.conclusion ||
+    summary.nextFollowUp ||
+    (Array.isArray(summary.keyPoints) && summary.keyPoints.length) ||
+    (Array.isArray(summary.changes) && summary.changes.length)
+  );
+}
+
+function normalizeFrameworkSections(sections) {
+  return visibleItems(sections).map((section) => ({
+    ...section,
+    content: String(section?.content || "").trim()
+  }));
+}
+
+function normalizeDynamicSections(sections) {
+  return visibleItems(sections)
+    .filter((section) => {
+      const visibility = String(section?.visibility || "").trim().toLowerCase();
+      return visibility === "visible" || visibility === "pinned";
+    })
+    .map((section) => ({
+      ...section,
+      items: visibleItems(section?.items)
+    }));
 }
 
 function formatDuration(seconds) {
@@ -86,7 +165,32 @@ function meetingTitle(meeting, snapshot) {
 }
 
 function meetingType(meeting, snapshot) {
-  return snapshot.meetingType || meeting?.meetingType || meeting?.type || "general";
+  const value = snapshot.meetingType || meeting?.meetingType || meeting?.type || "general";
+  return value === "unknown" ? "general" : value;
+}
+
+function meetingTypeLabel(value) {
+  const normalized = value || "general";
+  return MEETING_TYPE_OPTIONS.find((item) => item.value === normalized)?.label || normalized;
+}
+
+function shouldShowSourceText(content, sourceText) {
+  const source = String(sourceText || "").trim();
+  const main = String(content || "").trim();
+  if (!source || !main) return Boolean(source);
+  const sourceKey = normalizeDisplayCompare(source);
+  const mainKey = normalizeDisplayCompare(main);
+  if (!sourceKey || !mainKey) return Boolean(source);
+  if (sourceKey === mainKey) return false;
+  if (sourceKey.includes(mainKey) && sourceKey.length <= mainKey.length + 14) return false;
+  if (mainKey.includes(sourceKey) && mainKey.length <= sourceKey.length + 14) return false;
+  return true;
+}
+
+function normalizeDisplayCompare(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[\s，。！？、；：,.!?;:"“”'‘’（）()[\]【】《》\-—_/\\|]+/g, "");
 }
 
 function itemMissingText(fields) {
@@ -104,8 +208,24 @@ function hasMissingFields(item) {
   return Array.isArray(item?.missingFields) && item.missingFields.length > 0;
 }
 
+function isCompletedInsightItem(collectionKey, item) {
+  if (collectionKey !== "actionItems") return false;
+  const status = String(item?.status || "").trim().toLowerCase();
+  return status === "completed" || status === "done" || status === "closed";
+}
+
 function itemMotionKey(collectionKey, item) {
+  if (collectionKey === "frameworkSections" && item?.sectionKey) {
+    return `${collectionKey}:${item.sectionKey}`;
+  }
   return `${collectionKey}:${item?.id || item?.__motionKey || ""}`;
+}
+
+function collectionItemIdentity(collectionKey, item) {
+  if (collectionKey === "frameworkSections" && item?.sectionKey) {
+    return item.sectionKey;
+  }
+  return item?.id || "";
 }
 
 function stableItemSignature(item) {
@@ -119,6 +239,18 @@ function stableItemSignature(item) {
     level: item?.level || "",
     impact: item?.impact || "",
     mitigation: item?.mitigation || "",
+    title: item?.title || "",
+    description: item?.description || "",
+    sectionKey: item?.sectionKey || "",
+    items: Array.isArray(item?.items)
+      ? item.items.map((entry) => ({
+          id: entry?.id || "",
+          title: entry?.title || "",
+          content: entry?.content || "",
+          sourceText: entry?.sourceText || "",
+          status: entry?.status || ""
+        }))
+      : [],
     sourceText: item?.sourceText || "",
     missingFields: Array.isArray(item?.missingFields) ? [...item.missingFields].sort() : []
   });
@@ -128,10 +260,29 @@ function missingSignature(item) {
   return Array.isArray(item?.missingFields) ? [...item.missingFields].sort().join("|") : "";
 }
 
-function hasSnapshotContent(snapshot) {
-  if (!snapshot) return false;
-  if (snapshot.meetingId || snapshot.summary?.content || snapshot.title) return true;
-  return INSIGHT_COLLECTIONS.some((collection) => Array.isArray(snapshot[collection.key]) && snapshot[collection.key].length > 0);
+function snapshotMotionSignature(snapshot) {
+  const normalized = normalizeSnapshot(snapshot);
+  return JSON.stringify({
+    meetingId: normalized.meetingId || "",
+    title: normalized.title || "",
+    meetingType: normalized.meetingType || "",
+    summary: normalized.summary ? {
+      brief: normalized.summary.brief || "",
+      background: normalized.summary.background || "",
+      keyPoints: normalized.summary.keyPoints || [],
+      progress: normalized.summary.progress || "",
+      changes: normalized.summary.changes || [],
+      conclusion: normalized.summary.conclusion || "",
+      nextFollowUp: normalized.summary.nextFollowUp || "",
+      content: normalized.summary.content || ""
+    } : null,
+    decisions: normalized.decisions.map((item) => [item.id || "", stableItemSignature(item)]),
+    actionItems: normalized.actionItems.map((item) => [item.id || "", stableItemSignature(item)]),
+    risks: normalized.risks.map((item) => [item.id || "", stableItemSignature(item)]),
+    openQuestions: normalized.openQuestions.map((item) => [item.id || "", stableItemSignature(item)]),
+    frameworkSections: normalized.frameworkSections.map((item) => [item.sectionKey || item.id || "", stableItemSignature(item)]),
+    dynamicSections: normalized.dynamicSections.map((item) => [item.id || "", stableItemSignature(item)])
+  });
 }
 
 function motionTypeFromIntent(event, fallback) {
@@ -146,25 +297,75 @@ function motionTypeFromIntent(event, fallback) {
   return fallback;
 }
 
+function convertedDestinationCollectionKey(event) {
+  switch (event?.intent || "") {
+    case "move_action_item_to_decision":
+      return "decisions";
+    case "move_decision_to_action_item":
+      return "actionItems";
+    default:
+      return "";
+  }
+}
+
+function createdMotionForCollection(event, collectionKey) {
+  const convertedDestination = convertedDestinationCollectionKey(event);
+  if (convertedDestination) {
+    return convertedDestination === collectionKey ? "converted" : "created";
+  }
+  const motion = motionTypeFromIntent(event, "created");
+  return motion === "deleting" ? "created" : motion;
+}
+
+function interactionCollectionKey(event) {
+  const text = `${event?.targetType || ""} ${event?.intent || ""}`;
+  if (/dynamic_section|dynamic/.test(text)) return "dynamicSections";
+  if (/framework_section|framework/.test(text)) return "frameworkSections";
+  if (/risk/.test(text)) return "risks";
+  if (/open_question|question/.test(text)) return "openQuestions";
+  if (/decision/.test(text)) return "decisions";
+  if (/action_item|action/.test(text)) return "actionItems";
+  return "";
+}
+
+function shouldRevealSummaryForInteraction(event) {
+  if (!event || event.executionStatus !== "success") return false;
+  if (interactionCollectionKey(event)) return true;
+  return /rewrite_summary|update_meeting_title/.test(event.intent || "");
+}
+
+function eventTargetsItem(event, item, index) {
+  const targetID = event?.targetId || "";
+  if (targetID && item?.id === targetID) return true;
+  const targetIndex = Number(event?.targetIndex) || 0;
+  return targetIndex > 0 && targetIndex === index + 1;
+}
+
 function buildAnimatedSnapshot(previous, next, event, animate) {
   const display = { ...next };
   const marks = {};
   let hasGhosts = false;
+  const eventCollection = interactionCollectionKey(event);
 
-  if (!animate || !hasSnapshotContent(previous)) {
+  if (!animate) {
     return { display: next, marks, hasGhosts };
   }
 
   INSIGHT_COLLECTIONS.forEach((collection) => {
     const previousItems = visibleItems(previous[collection.key]);
     const nextItems = visibleItems(next[collection.key]);
-    const previousByID = new Map(previousItems.filter((item) => item.id).map((item) => [item.id, item]));
-    const nextByID = new Map(nextItems.filter((item) => item.id).map((item) => [item.id, item]));
+    const previousByID = new Map(previousItems
+      .map((item) => [collectionItemIdentity(collection.key, item), item])
+      .filter(([id]) => id));
+    const nextByID = new Map(nextItems
+      .map((item) => [collectionItemIdentity(collection.key, item), item])
+      .filter(([id]) => id));
     const displayItems = [...nextItems];
 
     previousItems.forEach((item, index) => {
-      if (!item.id || nextByID.has(item.id)) return;
-      const ghost = { ...item, __motionGhost: true };
+      const identity = collectionItemIdentity(collection.key, item);
+      if (!identity || nextByID.has(identity)) return;
+      const ghost = { ...item, __motionGhost: true, __motionIndex: index };
       displayItems.splice(Math.min(index, displayItems.length), 0, ghost);
       marks[itemMotionKey(collection.key, ghost)] = "deleting";
       hasGhosts = true;
@@ -172,11 +373,15 @@ function buildAnimatedSnapshot(previous, next, event, animate) {
 
     nextItems.forEach((item) => {
       const key = itemMotionKey(collection.key, item);
-      const previousItem = item.id ? previousByID.get(item.id) : null;
+      const identity = collectionItemIdentity(collection.key, item);
+      const previousItem = identity ? previousByID.get(identity) : null;
 
       if (!previousItem) {
-        const createdMotion = motionTypeFromIntent(event, "created");
-        marks[key] = createdMotion === "deleting" ? "created" : createdMotion;
+        marks[key] = createdMotionForCollection(event, collection.key);
+        return;
+      }
+
+      if (eventCollection === collection.key && motionTypeFromIntent(event, "updated") === "deleting") {
         return;
       }
 
@@ -192,6 +397,51 @@ function buildAnimatedSnapshot(previous, next, event, animate) {
       const updateMotion = motionTypeFromIntent(event, "updated");
       marks[key] = updateMotion === "created" || updateMotion === "deleting" ? "updated" : updateMotion;
     });
+
+    if (!convertedDestinationCollectionKey(event) && eventCollection === collection.key && event?.executionStatus !== "failed") {
+      const eventMotion = motionTypeFromIntent(event, "updated");
+      const previousTargets = previousItems
+        .map((item, index) => ({ item, index }))
+        .filter(({ item, index }) => eventTargetsItem(event, item, index));
+      const nextTargets = nextItems
+        .map((item, index) => ({ item, index }))
+        .filter(({ item, index }) => eventTargetsItem(event, item, index));
+
+      if (eventMotion === "deleting") {
+        previousTargets.forEach(({ item, index }) => {
+          const existingIndex = displayItems.findIndex((candidate) => collectionItemIdentity(collection.key, candidate) === collectionItemIdentity(collection.key, item));
+          const existing = existingIndex >= 0 ? displayItems[existingIndex] : null;
+          if (existing) {
+            displayItems.splice(existingIndex, 1);
+            const ghost = {
+              ...existing,
+              __motionGhost: true,
+              __motionIndex: index,
+              __motionState: "deleting"
+            };
+            displayItems.splice(Math.min(index, displayItems.length), 0, ghost);
+            marks[itemMotionKey(collection.key, ghost)] = "deleting";
+            hasGhosts = true;
+            return;
+          }
+          if (displayItems.some((candidate) => candidate.__motionGhost && candidate.id === item.id)) return;
+          const ghost = {
+            ...item,
+            __motionGhost: true,
+            __motionIndex: index,
+            __motionState: "deleting"
+          };
+          displayItems.splice(Math.min(index, displayItems.length), 0, ghost);
+          marks[itemMotionKey(collection.key, ghost)] = "deleting";
+          hasGhosts = true;
+        });
+      } else {
+        nextTargets.forEach(({ item }) => {
+          const motion = eventMotion === "deleting" ? "updated" : eventMotion;
+          marks[itemMotionKey(collection.key, item)] = motion;
+        });
+      }
+    }
 
     display[collection.key] = displayItems;
   });
@@ -217,11 +467,255 @@ function interactionPhase(statusUpdate, event) {
 }
 
 function buildTranscriptText(utterances) {
-  return visibleItems(utterances)
-    .filter((item) => item.isFinal !== false)
-    .map((item) => (item.text || "").trim())
-    .filter(Boolean)
-    .join("\n\n");
+  return rebuildArticleTranscript(visibleItems(utterances)).join("");
+}
+
+function rebuildArticleTranscript(utterances) {
+  const completed = [];
+  let currentText = "";
+  let currentItem = null;
+  let lastLen = 0;
+
+  for (const item of utterances) {
+    if (item?.isFinal === false) continue;
+    const text = normalizeTranscriptText(item?.text || "");
+    if (!text) continue;
+
+    const textLen = text.length;
+    const shouldCommitPrevious = shouldCommitTranscriptSegment(currentText, text, currentItem, item, lastLen);
+
+    if (shouldCommitPrevious && currentText) {
+      pushArticleSegment(completed, currentText);
+      currentText = text;
+    } else if (!currentText || text.length >= currentText.length) {
+      currentText = text;
+    }
+
+    currentItem = item;
+    lastLen = textLen;
+  }
+
+  if (currentText) {
+    pushArticleSegment(completed, currentText);
+  }
+  return completed;
+}
+
+function shouldCommitTranscriptSegment(prev, next, prevItem, nextItem, lastLen) {
+  if (!prev || !next) return false;
+  if (next.startsWith(prev) || prev.startsWith(next)) return false;
+
+  const textLen = next.length;
+  const gapMs = utteranceGapMs(prevItem, nextItem);
+  if (gapMs >= 700 && isIndependentAfterPause(prev, next)) return true;
+  if (textLen < 5 && lastLen >= 8 && textLen < lastLen * 0.6) return true;
+  if (lastLen > 0 && textLen < lastLen * 0.6) return true;
+  return isLikelyNewIndependentSegment(prev, next);
+}
+
+function pushArticleSegment(segments, text) {
+  const normalized = normalizeTranscriptText(text);
+  if (!normalized) return;
+
+  const last = segments[segments.length - 1] || "";
+  if (last === normalized) return;
+  if (last && normalized.startsWith(last)) {
+    segments[segments.length - 1] = normalized;
+    return;
+  }
+  if (last && last.startsWith(normalized)) return;
+
+  segments.push(needsLeadingSpace(last, normalized) ? ` ${normalized}` : normalized);
+}
+
+function isLikelyNewIndependentSegment(prev, next) {
+  if (!prev || !next) return false;
+  if (next.startsWith(prev) || prev.startsWith(next)) return false;
+  const prefixLen = commonPrefixLength(prev, next);
+  const similarity = prefixLen / Math.min(prev.length, next.length);
+  const minLen = Math.min(prev.length, next.length);
+  if (minLen < 4) return false;
+  return similarity < 0.35;
+}
+
+function isIndependentAfterPause(prev, next) {
+  if (!prev || !next) return false;
+  if (next.startsWith(prev) || prev.startsWith(next)) return false;
+  if (/[。！？.!?]$/.test(prev)) return true;
+  const prefixLen = commonPrefixLength(prev, next);
+  const similarity = prefixLen / Math.min(prev.length, next.length);
+  return similarity < 0.5;
+}
+
+function utteranceGapMs(prevItem, nextItem) {
+  if (!prevItem || !nextItem || !prevItem.createdAt || !nextItem.createdAt) return 0;
+  const prevTime = Date.parse(prevItem.createdAt);
+  const nextTime = Date.parse(nextItem.createdAt);
+  if (!Number.isFinite(prevTime) || !Number.isFinite(nextTime)) return 0;
+  return Math.max(0, nextTime - prevTime);
+}
+
+function commonPrefixLength(a, b) {
+  const limit = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < limit && a[i] === b[i]) i += 1;
+  return i;
+}
+
+function normalizeTranscriptText(text) {
+  return String(text).replace(/\s+/g, " ").trim();
+}
+
+function needsLeadingSpace(prev, next) {
+  if (!prev || !next) return false;
+  if (/^[，。！？、；,.!?;:]/.test(next)) return false;
+  if (/[（(]$/.test(prev)) return false;
+  if (isCJK(lastChar(prev)) && isCJK(next[0])) return false;
+  return !/[，。！？、；,.!?;:\s]$/.test(prev);
+}
+
+function lastChar(value) {
+  return value ? value[value.length - 1] : "";
+}
+
+function isCJK(ch) {
+  if (!ch) return false;
+  const code = ch.charCodeAt(0);
+  return (code >= 0x3400 && code <= 0x9fff) || (code >= 0xf900 && code <= 0xfaff);
+}
+
+function stripMotionFields(item) {
+  const {
+    __motionBatch,
+    __motionGhost,
+    __motionIndex,
+    __motionKey,
+    __motionState,
+    ...clean
+  } = item || {};
+  return clean;
+}
+
+function insightItemID(collectionKey, item, index) {
+  if (collectionKey === "frameworkSections" && item?.sectionKey) {
+    return `${collectionKey}-${item.sectionKey}`;
+  }
+  return item?.id || item?.__motionKey || `${collectionKey}-${index}-${stableItemSignature(item)}`;
+}
+
+function useAnimatedInsightItems(items, collectionKey, motionMarks, motionRun) {
+  const [animatedItems, setAnimatedItems] = useState([]);
+  const previousItems = useRef(new Map());
+  const initialized = useRef(false);
+  const cleanupTimers = useRef([]);
+
+  useEffect(() => () => {
+    cleanupTimers.current.forEach((timer) => window.clearTimeout(timer));
+  }, []);
+
+  useEffect(() => {
+    cleanupTimers.current.forEach((timer) => window.clearTimeout(timer));
+    cleanupTimers.current = [];
+
+    const rawItems = Array.isArray(items) ? items : [];
+    const nextItems = rawItems.filter((item) => !item.__motionGhost);
+    const incomingGhosts = rawItems.filter((item) => item.__motionGhost);
+    const nextIDs = new Set(nextItems.map((item, index) => insightItemID(collectionKey, item, index)));
+    const incomingGhostIDs = new Set(incomingGhosts.map((item, index) => insightItemID(collectionKey, item, item.__motionIndex ?? index)));
+    const previous = previousItems.current;
+    const nextDisplay = nextItems.map((item, index) => {
+      const id = insightItemID(collectionKey, item, index);
+      const previousItem = previous.get(id);
+      const explicitMotion = motionMarks?.[itemMotionKey(collectionKey, item)] || "";
+      let motionState = explicitMotion;
+
+      if (initialized.current && !previousItem) {
+        motionState = motionState || "created";
+      } else if (initialized.current && previousItem && stableItemSignature(previousItem) !== stableItemSignature(item)) {
+        motionState = motionState || "updated";
+      }
+
+      return {
+        ...item,
+        __motionKey: id,
+        __motionState: motionState,
+        __motionBatch: motionState ? motionRun : 0
+      };
+    });
+
+    incomingGhosts.forEach((item, index) => {
+      const id = insightItemID(collectionKey, item, item.__motionIndex ?? index);
+      if (nextIDs.has(id)) return;
+      nextDisplay.splice(Math.min(item.__motionIndex ?? index, nextDisplay.length), 0, {
+        ...item,
+        __motionKey: id,
+        __motionGhost: true,
+        __motionState: item.__motionState || "deleting",
+        __motionBatch: motionRun || item.__motionBatch || 1
+      });
+    });
+
+    Array.from(previous.entries()).forEach(([id, item], previousIndex) => {
+      if (nextIDs.has(id)) return;
+      if (incomingGhostIDs.has(id)) return;
+      nextDisplay.splice(Math.min(previousIndex, nextDisplay.length), 0, {
+        ...item,
+        __motionKey: id,
+        __motionGhost: true,
+        __motionState: "deleting",
+        __motionBatch: motionRun
+      });
+    });
+
+    previousItems.current = new Map(nextItems.map((item, index) => [
+      insightItemID(collectionKey, item, index),
+      stripMotionFields(item)
+    ]));
+    initialized.current = true;
+    setAnimatedItems(nextDisplay);
+
+    cleanupTimers.current.push(window.setTimeout(() => {
+      setAnimatedItems((current) => current.filter((item) => !item.__motionGhost));
+    }, DELETE_MOTION_MS));
+
+    cleanupTimers.current.push(window.setTimeout(() => {
+      setAnimatedItems((current) => current.map((item) => ({
+        ...item,
+        __motionState: "",
+        __motionBatch: 0
+      })));
+    }, ITEM_MOTION_MS));
+  }, [collectionKey, items, motionMarks, motionRun]);
+
+  return animatedItems;
+}
+
+function usePresence(open, duration = MODAL_TRANSITION_MS) {
+  const [rendered, setRendered] = useState(open);
+  const [phase, setPhase] = useState(open ? "open" : "closed");
+
+  useEffect(() => {
+    let timer = 0;
+    let frame = 0;
+
+    if (open) {
+      setRendered(true);
+      frame = window.requestAnimationFrame(() => setPhase("open"));
+    } else if (rendered) {
+      setPhase("closing");
+      timer = window.setTimeout(() => {
+        setRendered(false);
+        setPhase("closed");
+      }, duration);
+    }
+
+    return () => {
+      window.clearTimeout(timer);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [duration, open, rendered]);
+
+  return { rendered, phase };
 }
 
 export default function App() {
@@ -229,6 +723,7 @@ export default function App() {
   const currentMeetingID = useRef("");
   const wsReconnectTimer = useRef(0);
   const actualSnapshotRef = useRef(EMPTY_SNAPSHOT);
+  const duplicateSnapshotRef = useRef(null);
   const motionTimers = useRef([]);
 
   const [meeting, setMeeting] = useState(null);
@@ -239,8 +734,10 @@ export default function App() {
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const [displaySnapshot, setDisplaySnapshot] = useState(EMPTY_SNAPSHOT);
   const [motionMarks, setMotionMarks] = useState({});
+  const [motionRun, setMotionRun] = useState(0);
   const [interactions, setInteractions] = useState([]);
   const [interactionStatus, setInteractionStatus] = useState(null);
+  const [intelligenceStatus, setIntelligenceStatus] = useState(null);
   const [activeView, setActiveViewState] = useState(() => {
     const savedView = localStorage.getItem("meetingDisplayView") || "live";
     return VIEW_LABELS[savedView] ? savedView : "live";
@@ -249,6 +746,7 @@ export default function App() {
   const [shareOpen, setShareOpen] = useState(false);
   const [endConfirmOpen, setEndConfirmOpen] = useState(false);
   const [interactionCollapsed, setInteractionCollapsed] = useState(() => localStorage.getItem("interactionDockCollapsed") !== "false");
+  const [meetingTypeSaving, setMeetingTypeSaving] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState("正在连接会议服务...");
   const [socketState, setSocketState] = useState("connecting");
 
@@ -263,6 +761,32 @@ export default function App() {
     motionTimers.current = [];
   }, []);
 
+  const suppressNextDuplicateSnapshot = useCallback((rawSnapshot) => {
+    const normalized = normalizeSnapshot(rawSnapshot);
+    duplicateSnapshotRef.current = {
+      meetingId: normalized.meetingId || "",
+      signature: snapshotMotionSignature(normalized),
+      until: Date.now() + 2200
+    };
+  }, []);
+
+  const shouldSkipDuplicateSnapshot = useCallback((rawSnapshot) => {
+    const duplicate = duplicateSnapshotRef.current;
+    if (!duplicate || Date.now() > duplicate.until) {
+      duplicateSnapshotRef.current = null;
+      return false;
+    }
+    const normalized = normalizeSnapshot(rawSnapshot);
+    if (duplicate.meetingId && normalized.meetingId && duplicate.meetingId !== normalized.meetingId) {
+      return false;
+    }
+    const sameSnapshot = duplicate.signature === snapshotMotionSignature(normalized);
+    if (sameSnapshot) {
+      duplicateSnapshotRef.current = null;
+    }
+    return sameSnapshot;
+  }, []);
+
   const applyIntelligenceSnapshot = useCallback((rawSnapshot, event = null, animate = true) => {
     const next = normalizeSnapshot(rawSnapshot);
     const previous = actualSnapshotRef.current || EMPTY_SNAPSHOT;
@@ -274,11 +798,12 @@ export default function App() {
     setDisplaySnapshot(result.display);
     setMotionMarks(result.marks);
 
-    if (Object.keys(result.marks).length > 0) {
+    if (animate && (event || Object.keys(result.marks).length > 0)) {
+      setMotionRun((value) => value + 1);
       const timer = window.setTimeout(() => {
         setDisplaySnapshot(next);
         setMotionMarks({});
-      }, result.hasGhosts ? 1900 : 2400);
+      }, result.hasGhosts ? DELETE_MOTION_MS : ITEM_MOTION_MS);
       motionTimers.current = [timer];
     }
   }, [clearMotionTimers]);
@@ -317,6 +842,26 @@ export default function App() {
     await fetchJSON(`/api/meetings/${encodeURIComponent(meetingID)}/end`, { method: "POST" });
     setEndConfirmOpen(false);
   }, [meetingID]);
+
+  const updateMeetingType = useCallback(async (nextType) => {
+    if (!meetingID || !nextType) return;
+    setMeetingTypeSaving(true);
+    try {
+      const result = await fetchJSON(`/api/meetings/${encodeURIComponent(meetingID)}/type`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ meetingType: nextType, locked: true })
+      });
+      if (result?.meeting) {
+        setMeeting(result.meeting);
+      }
+      if (result?.snapshot) {
+        applyIntelligenceSnapshot(result.snapshot, null, true);
+      }
+    } finally {
+      setMeetingTypeSaving(false);
+    }
+  }, [applyIntelligenceSnapshot, meetingID]);
 
   const loadMeetingData = useCallback(async (id) => {
     if (!id || !acceptMeetingID(id)) return;
@@ -418,7 +963,27 @@ export default function App() {
 
         if (message.type === "intelligence_update") {
           if (message.meetingId) acceptMeetingID(message.meetingId);
+          if (shouldSkipDuplicateSnapshot(message)) return;
+          setIntelligenceStatus({ status: "completed", message: "结构化分析已完成。", timestamp: message.timestamp || new Date().toISOString() });
           applyIntelligenceSnapshot(message, null, true);
+        }
+
+        if (message.type === "intelligence_status") {
+          if (message.meetingId) acceptMeetingID(message.meetingId);
+          setIntelligenceStatus({
+            status: message.status || "running",
+            message: message.message || "结构化状态更新",
+            timestamp: message.timestamp || new Date().toISOString()
+          });
+        }
+
+        if (message.type === "intelligence_error") {
+          if (message.meetingId) acceptMeetingID(message.meetingId);
+          setIntelligenceStatus({
+            status: "failed",
+            message: message.message || "结构化分析失败",
+            timestamp: message.timestamp || new Date().toISOString()
+          });
         }
 
         if (message.type === "interaction_status") {
@@ -434,6 +999,10 @@ export default function App() {
             return [...next, message.event];
           });
           if (message.snapshot) {
+            if (shouldRevealSummaryForInteraction(message.event)) {
+              setActiveView("summary", false);
+            }
+            suppressNextDuplicateSnapshot(message.snapshot);
             applyIntelligenceSnapshot(message.snapshot, message.event, true);
           }
           if (message.event.intent === "show_share_qr") {
@@ -462,13 +1031,14 @@ export default function App() {
       window.clearTimeout(wsReconnectTimer.current);
       if (socket) socket.close();
     };
-  }, [acceptMeetingID, applyIntelligenceSnapshot, applyStateUpdate, setActiveView]);
+  }, [acceptMeetingID, applyIntelligenceSnapshot, applyStateUpdate, setActiveView, shouldSkipDuplicateSnapshot, suppressNextDuplicateSnapshot]);
 
   const counts = {
     decisions: snapshot.decisions.length,
     actions: snapshot.actionItems.length,
     risks: snapshot.risks.length,
-    questions: snapshot.openQuestions.length
+    questions: snapshot.openQuestions.length,
+    dynamicSections: snapshot.dynamicSections.length
   };
 
   return (
@@ -481,28 +1051,35 @@ export default function App() {
         duration={durationSeconds}
         socketState={socketState}
         activeView={activeView}
+        typeSaving={meetingTypeSaving}
         onViewChange={setActiveView}
+        onTypeChange={updateMeetingType}
         onOpenShare={() => setShareOpen(true)}
       />
 
       {loadingMessage ? <div className="system-banner">{loadingMessage}</div> : null}
 
       <section className={`display-stage view-${activeView}`} aria-live="polite">
-        {activeView === "live" ? (
-          <LiveView
-            transcriptText={transcriptText}
-            summary={snapshot.summary?.content || ""}
-            counts={counts}
-            utteranceCount={utterances.length}
-          />
-        ) : (
-          <BookView
-            key={`${activeView}-${viewVersion}`}
-            view={activeView}
-            snapshot={displaySnapshot}
-            motionMarks={motionMarks}
-          />
-        )}
+        <div key={`${activeView}-${viewVersion}`} className={`view-frame view-frame-${activeView}`}>
+          {activeView === "live" ? (
+            <LiveView
+              transcriptText={transcriptText}
+              summary={snapshot.summary}
+              counts={counts}
+              utteranceCount={utterances.length}
+              intelligenceStatus={intelligenceStatus}
+            />
+          ) : (
+            <BookView
+              view={activeView}
+              snapshot={displaySnapshot}
+              meetingType={type}
+              intelligenceStatus={intelligenceStatus}
+              motionMarks={motionMarks}
+              motionRun={motionRun}
+            />
+          )}
+        </div>
         <InteractionDock
           phase={phase}
           statusUpdate={interactionStatus}
@@ -529,14 +1106,33 @@ export default function App() {
   );
 }
 
-function Header({ title, type, meetingID, status, duration, socketState, activeView, onViewChange, onOpenShare }) {
+function Header({ title, type, meetingID, status, duration, socketState, activeView, typeSaving, onViewChange, onTypeChange, onOpenShare }) {
+  const previousTitle = useRef(title);
+  const [titleRun, setTitleRun] = useState(0);
+
+  useEffect(() => {
+    if (previousTitle.current && previousTitle.current !== title) {
+      setTitleRun((value) => value + 1);
+    }
+    previousTitle.current = title;
+  }, [title]);
+
   return (
     <header className="topbar">
       <div className="identity">
         <span className="eyebrow">AI Meeting Secretary</span>
-        <h1>{title}</h1>
+        <h1 key={`${title}-${titleRun}`} className={titleRun > 0 ? "title-motion" : ""}>{title}</h1>
         <div className="meta-line">
-          <span>{type}</span>
+          {MEETING_FRAMEWORK_UI_ENABLED ? (
+            <label className="type-select-wrap">
+              <span>类型</span>
+              <select value={type} disabled={!meetingID || typeSaving} onChange={(event) => onTypeChange(event.target.value)}>
+                {MEETING_TYPE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <span>{meetingID || "未绑定会议"}</span>
         </div>
       </div>
@@ -571,7 +1167,19 @@ function StatusPill({ label, tone }) {
   return <span className={`status-pill ${tone}`}>{label}</span>;
 }
 
-function LiveView({ transcriptText, summary, counts, utteranceCount }) {
+function LiveView({ transcriptText, summary, counts, utteranceCount, intelligenceStatus }) {
+  const transcriptRef = useRef(null);
+  const brief = summaryText(summary);
+
+  useEffect(() => {
+    const element = transcriptRef.current;
+    if (!element || !transcriptText) return;
+    const frame = window.requestAnimationFrame(() => {
+      element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [transcriptText, utteranceCount]);
+
   return (
     <div className="live-layout">
       <section className="panel transcript-panel" aria-label="实时转写全文">
@@ -582,7 +1190,7 @@ function LiveView({ transcriptText, summary, counts, utteranceCount }) {
           </div>
           <span className="count-badge">{utteranceCount} 段</span>
         </div>
-        <div className={`transcript-body ${transcriptText ? "" : "placeholder"}`}>
+        <div ref={transcriptRef} className={`transcript-body ${transcriptText ? "" : "placeholder"}`}>
           {transcriptText || "等待会议开始，转写内容会在这里按全文连续展示。"}
         </div>
       </section>
@@ -593,16 +1201,17 @@ function LiveView({ transcriptText, summary, counts, utteranceCount }) {
             <p className="panel-kicker">Meeting Summary</p>
             <h2>会议摘要</h2>
           </div>
-          <span className="pulse-dot" aria-label="结构化提取运行中" />
+          <IntelligenceStatusBadge status={intelligenceStatus} />
         </div>
-        <div className={`summary-copy ${summary ? "" : "placeholder"}`}>
-          {summary || "结构化摘要会在转写积累后自动刷新。"}
+        <div className={`summary-copy ${brief ? "" : "placeholder"}`}>
+          {brief ? <SummaryStructuredView summary={summary} compact /> : "结构化摘要会在转写积累后自动刷新。"}
         </div>
         <div className="metric-grid" aria-label="结构化结果数量">
           <Metric label="待办" value={counts.actions} />
           <Metric label="决策" value={counts.decisions} />
           <Metric label="风险" value={counts.risks} />
           <Metric label="待确认" value={counts.questions} />
+          <Metric label="发现" value={counts.dynamicSections} />
         </div>
         <p className="view-hint">{VIEW_HINTS.live}</p>
       </aside>
@@ -610,7 +1219,55 @@ function LiveView({ transcriptText, summary, counts, utteranceCount }) {
   );
 }
 
-function BookView({ view, snapshot, motionMarks }) {
+function SummaryStrip({ summary }) {
+  const brief = summaryText(summary);
+  return (
+    <section className={`summary-strip ${brief ? "" : "placeholder"}`} aria-label="结构化摘要">
+      <div className="summary-strip-head">
+        <span>摘要</span>
+        <strong>{hasStructuredSummary(summary) ? "结构化" : "实时"}</strong>
+      </div>
+      {brief ? <SummaryStructuredView summary={summary} /> : <p>暂无摘要。</p>}
+    </section>
+  );
+}
+
+function SummaryStructuredView({ summary, compact = false }) {
+  const brief = summaryText(summary);
+  const keyPoints = Array.isArray(summary?.keyPoints) ? summary.keyPoints : [];
+  const changes = Array.isArray(summary?.changes) ? summary.changes : [];
+  return (
+    <div className={`summary-structured ${compact ? "compact" : ""}`}>
+      {brief ? <p className="summary-brief">{brief}</p> : null}
+      <div className="summary-section-grid">
+        <SummarySection label="背景" value={summary?.background} />
+        <SummarySection label="进展" value={summary?.progress} />
+        <SummarySection label="结论" value={summary?.conclusion} />
+        <SummarySection label="跟进" value={summary?.nextFollowUp} />
+        <SummarySection label="关键要点" values={keyPoints} wide />
+        <SummarySection label="重要变化" values={changes} wide />
+      </div>
+    </div>
+  );
+}
+
+function SummarySection({ label, value, values, wide = false }) {
+  const list = Array.isArray(values) ? values.filter(Boolean) : [];
+  const text = String(value || "").trim();
+  if (!text && list.length === 0) return null;
+  return (
+    <div className={`summary-section ${wide ? "wide" : ""}`}>
+      <span>{label}</span>
+      {list.length ? (
+        <ul>
+          {list.map((item, index) => <li key={`${label}-${index}`}>{item}</li>)}
+        </ul>
+      ) : <p>{text}</p>}
+    </div>
+  );
+}
+
+function BookView({ view, snapshot, meetingType, intelligenceStatus, motionMarks, motionRun }) {
   return (
     <div className="book-stage">
       <section className="book-page" aria-label={VIEW_LABELS[view]}>
@@ -618,14 +1275,32 @@ function BookView({ view, snapshot, motionMarks }) {
           <div>
             <p className="panel-kicker">Structured Intelligence</p>
             <h2>{VIEW_LABELS[view]}</h2>
+            <IntelligenceStatusBadge status={intelligenceStatus} compact />
           </div>
           <p>{VIEW_HINTS[view]}</p>
         </div>
 
-        <div className="summary-strip">
-          <span>摘要</span>
-          <p>{snapshot.summary?.content || "暂无摘要。"}</p>
-        </div>
+        <SummaryStrip summary={snapshot.summary} />
+
+        {MEETING_FRAMEWORK_UI_ENABLED && snapshot.frameworkSections.length ? (
+          <InsightList
+            title={`${meetingTypeLabel(meetingType)}记录框架`}
+            collectionKey="frameworkSections"
+            items={snapshot.frameworkSections}
+            empty="暂无会议框架模块"
+            motionMarks={motionMarks}
+            motionRun={motionRun}
+            className="framework-list"
+            renderItem={(item, index) => (
+              <>
+                <strong>{index + 1}. {item.title}</strong>
+                <p className={`framework-content ${item.content ? "" : "placeholder"}`}>
+                  {item.content || "暂未提取到明确内容"}
+                </p>
+              </>
+            )}
+          />
+        ) : null}
 
         <div className="insight-grid">
           <InsightList
@@ -634,6 +1309,7 @@ function BookView({ view, snapshot, motionMarks }) {
             items={snapshot.actionItems}
             empty="暂无待办事项"
             motionMarks={motionMarks}
+            motionRun={motionRun}
             renderItem={(item, index) => (
               <>
                 <strong>{index + 1}. {item.task}</strong>
@@ -648,10 +1324,11 @@ function BookView({ view, snapshot, motionMarks }) {
             items={snapshot.decisions}
             empty="暂无会议决策"
             motionMarks={motionMarks}
+            motionRun={motionRun}
             renderItem={(item, index) => (
               <>
                 <strong>{index + 1}. {item.content}</strong>
-                {item.sourceText ? <small>来源：{item.sourceText}</small> : null}
+                {shouldShowSourceText(item.content, item.sourceText) ? <small>来源：{item.sourceText}</small> : null}
               </>
             )}
           />
@@ -661,6 +1338,7 @@ function BookView({ view, snapshot, motionMarks }) {
             items={snapshot.risks}
             empty="暂无风险与阻塞"
             motionMarks={motionMarks}
+            motionRun={motionRun}
             renderItem={(item, index) => (
               <>
                 <strong>{index + 1}. {item.content}</strong>
@@ -677,6 +1355,7 @@ function BookView({ view, snapshot, motionMarks }) {
             items={snapshot.openQuestions}
             empty="暂无待确认问题"
             motionMarks={motionMarks}
+            motionRun={motionRun}
             renderItem={(item, index) => (
               <>
                 <strong>{index + 1}. {item.question}</strong>
@@ -687,8 +1366,35 @@ function BookView({ view, snapshot, motionMarks }) {
           />
         </div>
 
+        {snapshot.dynamicSections.length ? (
+          <InsightList
+            title="动态模块"
+            collectionKey="dynamicSections"
+            items={snapshot.dynamicSections}
+            empty="暂无动态模块"
+            motionMarks={motionMarks}
+            motionRun={motionRun}
+            className="dynamic-modules-list"
+            renderItem={(section, index) => (
+              <DynamicSectionItem section={section} index={index} />
+            )}
+          />
+        ) : null}
+
       </section>
     </div>
+  );
+}
+
+function IntelligenceStatusBadge({ status, compact = false }) {
+  const current = status?.status || "";
+  const message = status?.message || "等待结构化分析";
+  const tone = current === "failed" ? "failed" : current === "completed" ? "completed" : current === "running" ? "running" : "idle";
+  return (
+    <span className={`intelligence-badge ${tone} ${compact ? "compact" : ""}`} title={message}>
+      <span className="intelligence-dot" aria-hidden="true" />
+      <span>{message}</span>
+    </span>
   );
 }
 
@@ -701,27 +1407,83 @@ function Metric({ label, value }) {
   );
 }
 
-function InsightList({ title, collectionKey, items, empty, motionMarks, renderItem }) {
+function DynamicSectionItem({ section, index }) {
+  const entries = Array.isArray(section.items) ? section.items.filter((item) => !item.isDeleted) : [];
+
   return (
-    <section className="insight-list">
+    <>
+      <strong>{index + 1}. {section.title || "动态模块"}</strong>
+      {section.description ? <small>{section.description}</small> : null}
+      <div className="dynamic-module-items">
+        {entries.length ? entries.map((entry, itemIndex) => (
+          <div className="dynamic-module-entry" key={entry.id || `${section.id || index}-${itemIndex}`}>
+            <b>{entry.title || `条目 ${itemIndex + 1}`}</b>
+            <span>{entry.content || entry.sourceText || "暂无内容"}</span>
+            {entry.sourceText ? <small>来源：{entry.sourceText}</small> : null}
+          </div>
+        )) : <small>该模块暂无条目。</small>}
+      </div>
+    </>
+  );
+}
+
+function InsightList({ title, collectionKey, items, empty, motionMarks, motionRun, renderItem, className = "" }) {
+  const sourceItems = Array.isArray(items) ? items : [];
+  const animatedItems = useAnimatedInsightItems(sourceItems, collectionKey, motionMarks, motionRun);
+  const itemsRef = useRef(null);
+  const previousVisibleCount = useRef(sourceItems.length);
+  const hasMotion = animatedItems.some((item) => item.__motionState);
+  const visibleCount = sourceItems.filter((item) => !item.__motionGhost).length;
+  const hasNewContentMotion = animatedItems.some((item) => ["created", "converted", "restored"].includes(item.__motionState));
+  const motionScrollKey = animatedItems
+    .filter((item) => item.__motionState)
+    .map((item) => `${item.__motionKey || item.id || ""}:${item.__motionState}:${item.__motionBatch || 0}`)
+    .join("|");
+
+  useEffect(() => {
+    const element = itemsRef.current;
+    const motionTarget = element?.querySelector(
+      ".insight-item.motion-created, .insight-item.motion-updated, .insight-item.motion-deleting, .insight-item.motion-completed, .insight-item.motion-merged, .insight-item.motion-converted, .insight-item.motion-restored, .insight-item.motion-missing"
+    );
+    const shouldScroll = Boolean(motionTarget) || visibleCount > previousVisibleCount.current || hasNewContentMotion;
+    previousVisibleCount.current = visibleCount;
+    if (!element || !shouldScroll) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      const target = motionTarget || element.lastElementChild;
+      if (!target) return;
+      const top = Math.max(0, target.offsetTop - element.clientHeight * 0.36);
+      element.scrollTo({ top, behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [hasNewContentMotion, motionRun, motionScrollKey, visibleCount]);
+
+  return (
+    <section className={`insight-list ${className} ${hasMotion ? "list-has-motion" : ""}`.trim()}>
       <div className="insight-head">
         <h3>{title}</h3>
-        <span>{items.length}</span>
+        <span>{visibleCount}</span>
       </div>
-      <div className="insight-items">
-        {items.length ? items.map((item, index) => (
-          <article
-            className={[
-              "insight-item",
-              item.__motionGhost ? "motion-ghost" : "",
-              hasMissingFields(item) ? "has-missing" : "",
-              motionMarks?.[itemMotionKey(collectionKey, item)] ? `motion-${motionMarks[itemMotionKey(collectionKey, item)]}` : ""
-            ].filter(Boolean).join(" ")}
-            key={item.id || `${title}-${index}`}
-          >
-            {renderItem(item, index)}
-          </article>
-        )) : <p className="empty-state">{empty}</p>}
+      <div ref={itemsRef} className="insight-items">
+        {animatedItems.length ? animatedItems.map((item, index) => {
+          const motionMark = item.__motionState || motionMarks?.[itemMotionKey(collectionKey, item)];
+          const motionKey = item.id || `${title}-${index}`;
+          const ghostIndex = Number.isFinite(item.__motionIndex) ? item.__motionIndex : index;
+          return (
+            <article
+              className={[
+                "insight-item",
+                item.__motionGhost ? "motion-ghost" : "",
+                isCompletedInsightItem(collectionKey, item) ? "is-completed" : "",
+                hasMissingFields(item) ? "has-missing" : "",
+                motionMark ? `motion-${motionMark}` : ""
+              ].filter(Boolean).join(" ")}
+              key={motionMark ? `${item.__motionKey || motionKey}-${motionMark}-${item.__motionBatch || motionRun}` : (item.__motionKey || motionKey)}
+              style={item.__motionGhost ? { "--ghost-index": ghostIndex } : undefined}
+            >
+              {renderItem(item, index)}
+            </article>
+          );
+        }) : <p className="empty-state">{empty}</p>}
       </div>
     </section>
   );
@@ -732,6 +1494,7 @@ function InteractionDock({ phase, statusUpdate, event, collapsed, onToggle }) {
   const failed = phase === "failed";
   const message = failed ? (event?.errorMessage || event?.message || "执行失败") : (event?.message || statusUpdate?.message || "语音交互模块待命中。");
   const total = event?.durationMs ? `${event.durationMs} ms` : "";
+  const currentPhase = phase || "";
 
   return (
     <aside className={`interaction-dock ${phase ? "active" : ""} ${failed ? "failed" : ""} ${collapsed ? "collapsed" : ""}`} aria-label="语音交互状态">
@@ -751,14 +1514,14 @@ function InteractionDock({ phase, statusUpdate, event, collapsed, onToggle }) {
         <span>语音交互</span>
         <strong>{failed ? "失败" : phase === "completed" ? "完成" : phase ? "处理中" : "待命"}</strong>
       </div>
-      <div className="step-list">
+      <div className="step-list" aria-label="语音交互处理进度">
         {INTERACTION_STEPS.map((step) => (
           <div
             key={step.key}
-            className={`step ${stepClass(step.key, phase)}`}
+            className={`step ${stepClass(step.key, currentPhase)}`}
           >
-            <span />
-            <p>{step.label}</p>
+            <strong>{step.label}</strong>
+            <span>{step.detail}</span>
           </div>
         ))}
       </div>
@@ -788,13 +1551,14 @@ function stepClass(step, phase) {
 }
 
 function ShareModal({ open, meetingID, title, onClose }) {
-  if (!open) return null;
+  const presence = usePresence(open);
+  if (!presence.rendered) return null;
   const qrURL = meetingID ? apiPath(`/api/meetings/${encodeURIComponent(meetingID)}/share-qr.png?t=${Date.now()}`) : "";
   const minutesURL = meetingID ? apiPath(`/api/meetings/${encodeURIComponent(meetingID)}/minutes.md`) : "";
   const shareURL = meetingID ? apiPath(`/share/${encodeURIComponent(meetingID)}`) : "";
 
   return (
-    <div className="modal-layer" role="dialog" aria-modal="true" aria-label="会议纪要二维码">
+    <div className={`modal-layer ${presence.phase === "closing" ? "closing" : "open"}`} role="dialog" aria-modal="true" aria-label="会议纪要二维码">
       <div className="modal-card">
         <button className="modal-close" type="button" onClick={onClose} aria-label="关闭二维码弹窗">关闭</button>
         <p className="panel-kicker">Minutes Download</p>
@@ -816,11 +1580,12 @@ function ShareModal({ open, meetingID, title, onClose }) {
 }
 
 function EndMeetingConfirmModal({ open, title, status, onClose, onConfirm }) {
-  if (!open) return null;
+  const presence = usePresence(open);
+  if (!presence.rendered) return null;
   const alreadyEnded = status === "ended";
 
   return (
-    <div className="modal-layer" role="dialog" aria-modal="true" aria-label="确认结束会议">
+    <div className={`modal-layer ${presence.phase === "closing" ? "closing" : "open"}`} role="dialog" aria-modal="true" aria-label="确认结束会议">
       <div className="modal-card confirm-card">
         <button className="modal-close" type="button" onClick={onClose} aria-label="关闭确认弹窗">关闭</button>
         <p className="panel-kicker">End Meeting</p>

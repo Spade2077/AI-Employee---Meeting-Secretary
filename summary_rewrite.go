@@ -15,9 +15,6 @@ type summarySection struct {
 
 func (s *Server) rewriteSummaryByCommand(ctx context.Context, meetingID string, command InteractionCommand) (*MeetingSummary, error) {
 	content := strings.TrimSpace(command.Content)
-	if content == "" {
-		return nil, errSummaryContentRequired()
-	}
 	snapshot, err := s.store.GetIntelligenceSnapshot(ctx, meetingID)
 	if err != nil {
 		return nil, err
@@ -25,6 +22,16 @@ func (s *Server) rewriteSummaryByCommand(ctx context.Context, meetingID string, 
 	existing := ""
 	if snapshot != nil && snapshot.Summary != nil {
 		existing = snapshot.Summary.Content
+	}
+	if commandRequestsConciseSummary(command) {
+		next := buildConciseSummary(existing, snapshot)
+		if strings.TrimSpace(next) == "" {
+			return nil, errSummaryContentRequired()
+		}
+		return s.store.RewriteSummary(ctx, meetingID, next)
+	}
+	if content == "" {
+		return nil, errSummaryContentRequired()
 	}
 	section := detectSummarySection(command)
 	next := buildSummaryRewrite(existing, section, content)
@@ -61,6 +68,120 @@ func buildSummaryRewrite(existing string, section summarySection, content string
 		return replaced
 	}
 	return existing + "\n" + replacement
+}
+
+func commandRequestsConciseSummary(command InteractionCommand) bool {
+	text := normalizeForCompare(command.Instruction + " " + command.Reason + " " + command.Content)
+	return containsNormalizedPhrase(text, "简短", "精简", "短一点", "短一些", "简洁", "压缩", "浓缩", "makeconcise")
+}
+
+func buildConciseSummary(existing string, snapshot *IntelligenceSnapshot) string {
+	parts := []string{}
+	if snapshot != nil && snapshot.Summary != nil {
+		if brief := trimSummarySentence(snapshot.Summary.Brief, 90); brief != "" {
+			parts = append(parts, "会议摘要："+brief)
+		}
+		if conclusion := trimSummarySentence(snapshot.Summary.Conclusion, 80); conclusion != "" {
+			parts = append(parts, "当前结论："+conclusion)
+		}
+		if followUp := trimSummarySentence(snapshot.Summary.NextFollowUp, 80); followUp != "" {
+			parts = append(parts, "下一步："+followUp)
+		}
+	}
+	if len(parts) == 0 {
+		if text := trimSummarySentence(existing, 80); text != "" {
+			parts = append(parts, "会议摘要："+text)
+		}
+	}
+	if snapshot != nil {
+		if len(snapshot.Decisions) > 0 {
+			parts = append(parts, "决策："+joinLimitedSummaryItems(decisionSummaryItems(snapshot.Decisions), 1, 60))
+		}
+		if len(snapshot.ActionItems) > 0 {
+			parts = append(parts, "待办："+joinLimitedSummaryItems(actionItemSummaryItems(snapshot.ActionItems), 1, 60))
+		}
+	}
+	if len(parts) == 0 {
+		return strings.TrimSpace(existing)
+	}
+	return strings.Join(nonEmptyStrings(parts), "\n")
+}
+
+func trimSummarySentence(value string, maxRunes int) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = stripSummaryLabelPrefix(value)
+	value = strings.Trim(value, " ，。；;,.")
+	runes := []rune(value)
+	if maxRunes > 0 && len(runes) > maxRunes {
+		value = string(runes[:maxRunes]) + "..."
+	}
+	if value != "" && !endsWithSentencePunctuation(value) {
+		value += "。"
+	}
+	return value
+}
+
+func stripSummaryLabelPrefix(value string) string {
+	for _, prefix := range []string{"会议摘要：", "会议摘要:", "摘要：", "摘要:", "总结：", "总结:"} {
+		value = strings.TrimPrefix(value, prefix)
+	}
+	return strings.TrimSpace(value)
+}
+
+func decisionSummaryItems(decisions []MeetingDecision) []string {
+	items := make([]string, 0, len(decisions))
+	for _, decision := range decisions {
+		items = append(items, decision.Content)
+	}
+	return items
+}
+
+func actionItemSummaryItems(actionItems []MeetingActionItem) []string {
+	items := make([]string, 0, len(actionItems))
+	for _, item := range actionItems {
+		value := strings.TrimSpace(item.Task)
+		if item.Owner != "" {
+			value += "（" + item.Owner + "）"
+		}
+		if item.DueDate != "" {
+			value += "，" + item.DueDate
+		}
+		items = append(items, value)
+	}
+	return items
+}
+
+func joinLimitedSummaryItems(values []string, limit, maxRunes int) string {
+	values = nonEmptyStrings(values)
+	if len(values) == 0 {
+		return ""
+	}
+	if limit > 0 && len(values) > limit {
+		values = values[:limit]
+	}
+	for index, value := range values {
+		values[index] = strings.Trim(strings.TrimSpace(value), " ，。；;,.")
+		if maxRunes > 0 {
+			runes := []rune(values[index])
+			if len(runes) > maxRunes {
+				values[index] = string(runes[:maxRunes]) + "..."
+			}
+		}
+	}
+	return strings.Join(values, "；") + "。"
+}
+
+func nonEmptyStrings(values []string) []string {
+	items := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			items = append(items, strings.TrimSpace(value))
+		}
+	}
+	return items
 }
 
 func normalizeSummaryReplacement(section summarySection, content string) string {

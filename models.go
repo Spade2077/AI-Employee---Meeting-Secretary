@@ -88,12 +88,19 @@ type LLMConfig struct {
 }
 
 type MeetingSummary struct {
-	ID                   string `json:"id"`
-	MeetingID            string `json:"meetingId"`
-	Content              string `json:"content"`
-	SourceUtteranceCount int    `json:"sourceUtteranceCount"`
-	CreatedAt            string `json:"createdAt"`
-	UpdatedAt            string `json:"updatedAt"`
+	ID                   string   `json:"id"`
+	MeetingID            string   `json:"meetingId"`
+	Content              string   `json:"content"`
+	Brief                string   `json:"brief"`
+	Background           string   `json:"background"`
+	KeyPoints            []string `json:"keyPoints"`
+	Progress             string   `json:"progress"`
+	Changes              []string `json:"changes"`
+	Conclusion           string   `json:"conclusion"`
+	NextFollowUp         string   `json:"nextFollowUp"`
+	SourceUtteranceCount int      `json:"sourceUtteranceCount"`
+	CreatedAt            string   `json:"createdAt"`
+	UpdatedAt            string   `json:"updatedAt"`
 }
 
 type MeetingDecision struct {
@@ -203,6 +210,8 @@ type InteractionCommand struct {
 	Mitigation    string   `json:"mitigation,omitempty"`
 	Question      string   `json:"question,omitempty"`
 	Title         string   `json:"title,omitempty"`
+	SectionKey    string   `json:"section_key,omitempty"`
+	SectionTitle  string   `json:"section_title,omitempty"`
 	Content       string   `json:"content,omitempty"`
 	Confidence    float64  `json:"confidence"`
 	NeedConfirm   bool     `json:"need_confirm"`

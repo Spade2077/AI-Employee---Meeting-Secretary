@@ -316,6 +316,32 @@ func (s *Server) handleMeetingInteractionWithTiming(ctx context.Context, result 
 	event.TargetIndex = command.TargetIndex
 	event.TargetID = command.TargetID
 	event.CommandJSON = commandJSON
+	if command.Intent == "correct_last_interaction" {
+		s.broadcastInteractionStatus(result.MeetingID, event.ID, "executing", "已识别口误纠错，正在撤销上一条并执行纠正后的指令")
+		executeStarted := time.Now()
+		snapshot, message, correctedCommand, correctedJSON, err := s.executeCorrectionInteraction(ctx, result.MeetingID, event.ID, instruction, command.Content, timing)
+		timing.addStage("execute_command", "执行口误纠错", time.Since(executeStarted), correctedCommand.Intent)
+		if correctedCommand.Intent != "" {
+			event.Intent = correctedCommand.Intent
+			event.TargetType = correctedCommand.TargetType
+			event.TargetIndex = correctedCommand.TargetIndex
+			event.TargetID = correctedCommand.TargetID
+			if correctedJSON == "" {
+				correctedJSON = interactionCommandJSON(correctedCommand)
+			}
+			event.CommandJSON = correctedJSON
+		}
+		if err != nil {
+			event.Message = message
+			event.ErrorMessage = err.Error()
+			s.saveAndBroadcastInteraction(ctx, event, snapshot)
+			return
+		}
+		event.ExecutionStatus = "success"
+		event.Message = message
+		s.saveAndBroadcastInteraction(ctx, event, snapshot)
+		return
+	}
 	s.broadcastInteractionStatus(result.MeetingID, event.ID, "executing", "已识别指令，正在执行："+command.Intent)
 
 	executeStarted := time.Now()

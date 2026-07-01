@@ -41,6 +41,102 @@ func (s *Server) executeInteractionCommandWithEventID(ctx context.Context, meeti
 	case "request_end_meeting":
 		return s.snapshotWithMessage(ctx, meetingID, "已收到结束会议请求，请在页面确认后结束会议。")
 
+	case "create_dynamic_section":
+		result, err := s.executeInteractionTool(ctx, meetingID, eventID, 1, ToolDynamicSectionCreate, dynamicSectionCreateToolArgsFromCommand(command))
+		if err != nil {
+			return nil, "新增动态模块失败。", err
+		}
+		return s.snapshotWithMessage(ctx, meetingID, result.Message)
+
+	case "add_dynamic_section_item":
+		result, err := s.executeInteractionTool(ctx, meetingID, eventID, 1, ToolDynamicSectionAddItem, dynamicSectionAddItemToolArgsFromCommand(command))
+		if err != nil {
+			return nil, "追加动态模块内容失败。", err
+		}
+		return s.snapshotWithMessage(ctx, meetingID, result.Message)
+
+	case "update_dynamic_section":
+		result, err := s.executeInteractionTool(ctx, meetingID, eventID, 1, ToolDynamicSectionUpdate, dynamicSectionUpdateToolArgsFromCommand(command))
+		if err != nil {
+			return nil, "更新动态模块失败。", err
+		}
+		return s.snapshotWithMessage(ctx, meetingID, result.Message)
+
+	case "update_dynamic_section_item":
+		result, err := s.executeInteractionTool(ctx, meetingID, eventID, 1, ToolDynamicSectionItemUpdate, dynamicSectionItemUpdateToolArgsFromCommand(command))
+		if err != nil {
+			return nil, "更新动态模块条目失败。", err
+		}
+		return s.snapshotWithMessage(ctx, meetingID, result.Message)
+
+	case "delete_dynamic_section":
+		index, section, err := s.resolveDynamicSectionTarget(ctx, meetingID, command)
+		if err != nil {
+			return nil, "没有找到要删除的动态模块。", err
+		}
+		deleted, err := s.store.DeleteDynamicSection(ctx, meetingID, section.ID)
+		if err != nil {
+			return nil, "删除动态模块失败。", err
+		}
+		s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{
+			Type:            "restore_dynamic_section",
+			DynamicSections: []MeetingDynamicSection{*section},
+		})
+		return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已删除第 %d 个动态模块：%s", index, deleted.Title))
+
+	case "merge_dynamic_sections":
+		ids, err := s.resolveMergeDynamicSectionIDs(ctx, meetingID, command)
+		if err != nil {
+			return nil, "没有找到要合并的动态模块。", err
+		}
+		originals, err := s.dynamicSectionSnapshots(ctx, meetingID, ids)
+		if err != nil {
+			return nil, "读取动态模块快照失败。", err
+		}
+		title := strings.TrimSpace(command.SectionTitle)
+		if title == "" {
+			title = strings.TrimSpace(command.Title)
+		}
+		merged, removed, err := s.store.MergeDynamicSections(ctx, meetingID, ids, title, command.Content)
+		if err != nil {
+			return nil, "合并动态模块失败。", err
+		}
+		s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{
+			Type:            "restore_dynamic_section_set",
+			DynamicSections: originals,
+		})
+		return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已合并 %d 个动态模块为：%s", len(removed)+1, merged.Title))
+
+	case "show_dynamic_section":
+		return s.executeDynamicSectionVisibility(ctx, meetingID, eventID, command, "visible")
+
+	case "hide_dynamic_section":
+		return s.executeDynamicSectionVisibility(ctx, meetingID, eventID, command, "hidden")
+
+	case "pin_dynamic_section":
+		return s.executeDynamicSectionVisibility(ctx, meetingID, eventID, command, "pinned")
+
+	case "unpin_dynamic_section":
+		return s.executeDynamicSectionVisibility(ctx, meetingID, eventID, command, "visible")
+
+	case "show_all_dynamic_sections":
+		return s.executeAllDynamicSectionsVisibility(ctx, meetingID, eventID, "visible")
+
+	case "hide_all_dynamic_sections":
+		return s.executeAllDynamicSectionsVisibility(ctx, meetingID, eventID, "hidden")
+
+	case "update_framework_section":
+		return s.executeFrameworkSectionMutation(ctx, meetingID, eventID, command, "replace")
+
+	case "append_framework_section":
+		return s.executeFrameworkSectionMutation(ctx, meetingID, eventID, command, "append")
+
+	case "rewrite_framework_section":
+		return s.executeFrameworkSectionMutation(ctx, meetingID, eventID, command, "replace")
+
+	case "clear_framework_section":
+		return s.executeFrameworkSectionMutation(ctx, meetingID, eventID, command, "clear")
+
 	case "delete_action_item":
 		index, item, err := s.resolveActionItemTarget(ctx, meetingID, command)
 		if err != nil {
@@ -110,11 +206,16 @@ func (s *Server) executeInteractionCommandWithEventID(ctx context.Context, meeti
 		if err != nil {
 			return nil, "没有找到要转为决策的待办。", err
 		}
+		previous := *item
 		_, decision, err := s.store.MoveActionItemToDecision(ctx, meetingID, item.ID, command.Content)
 		if err != nil {
 			return nil, "待办转决策失败。", err
 		}
-		s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{Type: "unsupported_operation"})
+		s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{
+			Type:       "restore_action_item_delete_decision",
+			ActionItem: &previous,
+			DecisionID: decision.ID,
+		})
 		return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已将第 %d 条待办转为决策：%s", index, decision.Content))
 
 	case "merge_action_items":
@@ -122,12 +223,19 @@ func (s *Server) executeInteractionCommandWithEventID(ctx context.Context, meeti
 		if err != nil {
 			return nil, "没有找到要合并的待办。", err
 		}
+		originals, err := s.actionItemSnapshots(ctx, meetingID, ids)
+		if err != nil {
+			return nil, "读取待办快照失败。", err
+		}
 		mutation := actionItemMutationFromCommand(command)
 		merged, removed, err := s.store.MergeActionItems(ctx, meetingID, ids, mutation)
 		if err != nil {
 			return nil, "合并待办失败。", err
 		}
-		s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{Type: "unsupported_operation"})
+		s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{
+			Type:        "restore_action_item_set",
+			ActionItems: originals,
+		})
 		return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已合并 %d 条待办为：%s", len(removed)+1, merged.Task))
 
 	case "delete_decision":
@@ -184,11 +292,18 @@ func (s *Server) executeInteractionCommandWithEventID(ctx context.Context, meeti
 		if err != nil {
 			return nil, "No decision targets found.", err
 		}
+		originals, err := s.decisionSnapshots(ctx, meetingID, ids)
+		if err != nil {
+			return nil, "Read decision snapshots failed.", err
+		}
 		merged, removed, err := s.store.MergeDecisions(ctx, meetingID, ids, command.Content)
 		if err != nil {
 			return nil, "Merge decisions failed.", err
 		}
-		s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{Type: "unsupported_operation"})
+		s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{
+			Type:      "restore_decision_set",
+			Decisions: originals,
+		})
 		return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("Merged %d decisions into: %s", len(removed)+1, merged.Content))
 
 	case "move_decision_to_action_item":
@@ -196,6 +311,7 @@ func (s *Server) executeInteractionCommandWithEventID(ctx context.Context, meeti
 		if err != nil {
 			return nil, "No decision target found.", err
 		}
+		previous := *decision
 		mutation := actionItemMutationFromCommand(command)
 		if mutation.Task == "" {
 			mutation.Task = decision.Content
@@ -204,7 +320,11 @@ func (s *Server) executeInteractionCommandWithEventID(ctx context.Context, meeti
 		if err != nil {
 			return nil, "Move decision to action item failed.", err
 		}
-		s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{Type: "unsupported_operation"})
+		s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{
+			Type:         "restore_decision_delete_action_item",
+			Decision:     &previous,
+			ActionItemID: item.ID,
+		})
 		return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("Moved decision %d to action item: %s", index, item.Task))
 
 	case "create_risk":
@@ -335,14 +455,23 @@ func (s *Server) executeInteractionCommandWithEventID(ctx context.Context, meeti
 
 	case "rewrite_summary_section":
 		content := strings.TrimSpace(command.Content)
-		if content == "" {
+		if content == "" && !commandRequestsConciseSummary(command) {
 			return nil, "没有识别到新的摘要内容。", fmt.Errorf("rewrite summary missing content")
+		}
+		beforeSnapshot, err := s.store.GetIntelligenceSnapshot(ctx, meetingID)
+		if err != nil {
+			return nil, "读取摘要快照失败。", err
 		}
 		summary, err := s.rewriteSummaryByCommand(ctx, meetingID, command)
 		if err != nil {
 			return nil, "更新摘要失败。", err
 		}
-		s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{Type: "unsupported_operation"})
+		if beforeSnapshot != nil && beforeSnapshot.Summary != nil {
+			s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{
+				Type:    "restore_summary",
+				Summary: beforeSnapshot.Summary,
+			})
+		}
 		return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已更新会议摘要，当前长度 %d 字。", len([]rune(summary.Content))))
 
 	case "undo_last_interaction":
@@ -350,6 +479,50 @@ func (s *Server) executeInteractionCommandWithEventID(ctx context.Context, meeti
 
 	default:
 		return nil, "暂不支持这个语音指令。", fmt.Errorf("unsupported interaction intent: %s", command.Intent)
+	}
+}
+
+func (s *Server) executeFrameworkSectionMutation(ctx context.Context, meetingID, eventID string, command InteractionCommand, mode string) (*IntelligenceSnapshot, string, error) {
+	index, previous, err := s.resolveFrameworkSectionTarget(ctx, meetingID, command)
+	if err != nil {
+		return nil, "没有找到要修改的会议框架模块。", err
+	}
+	content := strings.TrimSpace(command.Content)
+	if mode != "clear" && content == "" {
+		return nil, "没有识别到新的模块内容。", fmt.Errorf("framework section content is required")
+	}
+	sourceText := strings.TrimSpace(command.Instruction)
+	if sourceText == "" {
+		sourceText = strings.TrimSpace(command.Reason)
+	}
+	updated, err := s.store.ApplyFrameworkSectionMutation(ctx, meetingID, previous.MeetingType, previous.SectionKey, FrameworkSectionMutation{
+		Mode:       mode,
+		Content:    content,
+		SourceText: sourceText,
+		Locked:     true,
+	})
+	if err != nil {
+		return nil, "更新会议框架模块失败。", err
+	}
+	s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{
+		Type:             "restore_framework_section",
+		FrameworkSection: previous,
+	})
+	action := frameworkSectionActionLabel(mode)
+	if mode == "clear" {
+		return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已%s第 %d 个框架模块：%s。", action, index, updated.Title))
+	}
+	return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已%s第 %d 个框架模块：%s：%s", action, index, updated.Title, updated.Content))
+}
+
+func frameworkSectionActionLabel(mode string) string {
+	switch normalizeFrameworkMutationMode(mode) {
+	case "append":
+		return "补充"
+	case "clear":
+		return "清空"
+	default:
+		return "更新"
 	}
 }
 
@@ -368,6 +541,55 @@ func openQuestionMutationIsEmpty(mutation OpenQuestionMutation) bool {
 		mutation.Owner == "" &&
 		mutation.DueDate == "" &&
 		mutation.Status == ""
+}
+
+func (s *Server) executeDynamicSectionVisibility(ctx context.Context, meetingID, eventID string, command InteractionCommand, visibility string) (*IntelligenceSnapshot, string, error) {
+	index, section, err := s.resolveDynamicSectionTarget(ctx, meetingID, command)
+	if err != nil {
+		return nil, "没有找到要操作的动态模块。", err
+	}
+	previous := *section
+	updated, err := s.store.SetDynamicSectionVisibility(ctx, meetingID, section.ID, visibility)
+	if err != nil {
+		return nil, "更新动态模块展示状态失败。", err
+	}
+	s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{
+		Type:            "restore_dynamic_section_visibility",
+		DynamicSections: []MeetingDynamicSection{previous},
+	})
+	action := dynamicSectionVisibilityAction(visibility)
+	return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已%s第 %d 个动态模块：%s", action, index, updated.Title))
+}
+
+func (s *Server) executeAllDynamicSectionsVisibility(ctx context.Context, meetingID, eventID, visibility string) (*IntelligenceSnapshot, string, error) {
+	previous, err := s.store.ListDynamicSections(ctx, meetingID)
+	if err != nil {
+		return nil, "读取动态模块失败。", err
+	}
+	count, err := s.store.SetAllDynamicSectionVisibility(ctx, meetingID, visibility)
+	if err != nil {
+		return nil, "更新动态模块展示状态失败。", err
+	}
+	s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{
+		Type:            "restore_dynamic_section_visibility",
+		DynamicSections: previous,
+	})
+	action := dynamicSectionVisibilityAction(visibility)
+	if count == 0 {
+		return s.snapshotWithMessage(ctx, meetingID, "当前没有可操作的动态模块。")
+	}
+	return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已%s全部动态模块，共 %d 个。", action, count))
+}
+
+func dynamicSectionVisibilityAction(visibility string) string {
+	switch normalizeDynamicSectionVisibility(visibility) {
+	case "hidden":
+		return "隐藏"
+	case "pinned":
+		return "固定展示"
+	default:
+		return "展示"
+	}
 }
 
 func (s *Server) executeInteractionTool(ctx context.Context, meetingID, eventID string, stepIndex int, toolName ToolName, args map[string]any) (*ToolResult, error) {
@@ -403,6 +625,52 @@ func meetingTitleToolArgsFromCommand(command InteractionCommand) map[string]any 
 	}
 	putToolArg(args, "title", title)
 	putToolArg(args, "reason", command.Reason)
+	return args
+}
+
+func dynamicSectionCreateToolArgsFromCommand(command InteractionCommand) map[string]any {
+	args := map[string]any{}
+	title := strings.TrimSpace(command.SectionTitle)
+	if title == "" {
+		title = strings.TrimSpace(command.Title)
+	}
+	putToolArg(args, "title", title)
+	putToolArg(args, "section_key", command.SectionKey)
+	putToolArg(args, "description", command.Reason)
+	putToolArg(args, "content", command.Content)
+	putToolArg(args, "source_text", command.Instruction)
+	return args
+}
+
+func dynamicSectionAddItemToolArgsFromCommand(command InteractionCommand) map[string]any {
+	args := targetToolArgsFromCommand(command)
+	putToolArg(args, "section_key", command.SectionKey)
+	putToolArg(args, "section_title", command.SectionTitle)
+	putToolArg(args, "title", command.Title)
+	putToolArg(args, "content", command.Content)
+	putToolArg(args, "source_text", command.Instruction)
+	return args
+}
+
+func dynamicSectionUpdateToolArgsFromCommand(command InteractionCommand) map[string]any {
+	args := targetToolArgsFromCommand(command)
+	putToolArg(args, "section_key", command.SectionKey)
+	putToolArg(args, "section_title", command.SectionTitle)
+	putToolArg(args, "title", command.Title)
+	putToolArg(args, "description", command.Content)
+	putToolArg(args, "reason", command.Reason)
+	return args
+}
+
+func dynamicSectionItemUpdateToolArgsFromCommand(command InteractionCommand) map[string]any {
+	args := dynamicSectionAddItemToolArgsFromCommand(command)
+	delete(args, "source_text")
+	if len(command.SourceIndices) > 0 {
+		args["source_indices"] = command.SourceIndices
+	}
+	if len(command.SourceIDs) > 0 {
+		args["source_ids"] = command.SourceIDs
+	}
 	return args
 }
 

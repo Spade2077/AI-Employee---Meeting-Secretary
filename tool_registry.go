@@ -10,13 +10,17 @@ import (
 type ToolName string
 
 const (
-	ToolMeetingGetSnapshot ToolName = "meeting.get_snapshot"
-	ToolMeetingUpdateTitle ToolName = "meeting.update_title"
-	ToolMissingAlertList   ToolName = "missing_alert.list"
-	ToolRiskUpdate         ToolName = "risk.update"
-	ToolRiskClose          ToolName = "risk.close"
-	ToolOpenQuestionUpdate ToolName = "open_question.update"
-	ToolOpenQuestionClose  ToolName = "open_question.close"
+	ToolMeetingGetSnapshot       ToolName = "meeting.get_snapshot"
+	ToolMeetingUpdateTitle       ToolName = "meeting.update_title"
+	ToolMissingAlertList         ToolName = "missing_alert.list"
+	ToolDynamicSectionCreate     ToolName = "dynamic_section.create"
+	ToolDynamicSectionAddItem    ToolName = "dynamic_section.add_item"
+	ToolDynamicSectionUpdate     ToolName = "dynamic_section.update"
+	ToolDynamicSectionItemUpdate ToolName = "dynamic_section_item.update"
+	ToolRiskUpdate               ToolName = "risk.update"
+	ToolRiskClose                ToolName = "risk.close"
+	ToolOpenQuestionUpdate       ToolName = "open_question.update"
+	ToolOpenQuestionClose        ToolName = "open_question.close"
 )
 
 type ToolHandler func(ctx context.Context, input ToolInput) (*ToolResult, error)
@@ -102,6 +106,38 @@ func NewMeetingToolRegistry(server *Server) *ToolRegistry {
 		Undoable:    false,
 		ParamSchema: ToolParamSchema{Allowed: []string{"target_type", "field"}},
 		Handler:     server.toolMissingAlertList,
+	})
+	registry.Register(ToolDefinition{
+		Name:        ToolDynamicSectionCreate,
+		Description: "Create a user-defined dynamic meeting module, optionally with its first item.",
+		Readonly:    false,
+		Undoable:    true,
+		ParamSchema: ToolParamSchema{Required: []string{"title"}, Allowed: []string{"title", "section_key", "description", "content", "source_text", "reason"}},
+		Handler:     server.toolDynamicSectionCreate,
+	})
+	registry.Register(ToolDefinition{
+		Name:        ToolDynamicSectionAddItem,
+		Description: "Append one item to an existing dynamic meeting module.",
+		Readonly:    false,
+		Undoable:    true,
+		ParamSchema: ToolParamSchema{Required: []string{"content"}, Allowed: []string{"target_index", "target_id", "section_key", "section_title", "title", "content", "source_text", "reason"}},
+		Handler:     server.toolDynamicSectionAddItem,
+	})
+	registry.Register(ToolDefinition{
+		Name:        ToolDynamicSectionUpdate,
+		Description: "Update the title or description of an existing dynamic meeting module.",
+		Readonly:    false,
+		Undoable:    true,
+		ParamSchema: ToolParamSchema{Allowed: []string{"target_index", "target_id", "section_key", "section_title", "title", "description", "content", "reason"}},
+		Handler:     server.toolDynamicSectionUpdate,
+	})
+	registry.Register(ToolDefinition{
+		Name:        ToolDynamicSectionItemUpdate,
+		Description: "Update the title or content of one item inside an existing dynamic meeting module.",
+		Readonly:    false,
+		Undoable:    true,
+		ParamSchema: ToolParamSchema{Allowed: []string{"target_index", "target_id", "section_key", "section_title", "source_indices", "source_ids", "title", "content", "reason"}},
+		Handler:     server.toolDynamicSectionItemUpdate,
 	})
 	registry.Register(ToolDefinition{
 		Name:        ToolRiskUpdate,

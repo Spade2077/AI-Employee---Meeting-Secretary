@@ -42,6 +42,7 @@ func (s *Server) serveFrontendHTML(w http.ResponseWriter, r *http.Request, filen
 }
 
 func (s *Server) serveMeetingWeb(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	distRoot := filepath.Join("meeting-web", "dist")
 	indexPath := filepath.Join(distRoot, "index.html")
 	if _, err := os.Stat(indexPath); err != nil {

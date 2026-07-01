@@ -138,6 +138,8 @@ func (s *Server) handleMeetingAction(w http.ResponseWriter, r *http.Request) {
 		s.transitionHTTP(w, r, meetingID, "resume")
 	case r.Method == http.MethodPost && action == "end":
 		s.endMeetingHTTP(w, r, meetingID)
+	case r.Method == http.MethodPost && action == "type":
+		s.updateMeetingTypeHTTP(w, r, meetingID)
 	case r.Method == http.MethodPost && action == "utterances":
 		s.addUtteranceHTTP(w, r, meetingID)
 	case r.Method == http.MethodGet && action == "audio" && len(parts) == 3 && parts[2] == "ws":
@@ -187,6 +189,39 @@ func (s *Server) handleMeetingAction(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "unknown action")
 	}
+}
+
+func (s *Server) updateMeetingTypeHTTP(w http.ResponseWriter, r *http.Request, meetingID string) {
+	var req struct {
+		MeetingType string `json:"meetingType"`
+		Type        string `json:"type"`
+		Locked      *bool  `json:"locked"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	meetingType := req.MeetingType
+	if strings.TrimSpace(meetingType) == "" {
+		meetingType = req.Type
+	}
+	locked := true
+	if req.Locked != nil {
+		locked = *req.Locked
+	}
+	meeting, err := s.store.UpdateMeetingType(r.Context(), meetingID, meetingType, locked)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.hub.Broadcast(s.stateUpdate(meeting, nil))
+	snapshot, err := s.store.GetIntelligenceSnapshot(r.Context(), meetingID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.hub.Broadcast(snapshot)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"meeting":  meeting,
+		"snapshot": snapshot,
+	})
 }
 
 func (s *Server) transitionHTTP(w http.ResponseWriter, r *http.Request, meetingID, eventType string) {

@@ -69,6 +69,13 @@ func (s *Store) Init(ctx context.Context) error {
 			id TEXT PRIMARY KEY,
 			meeting_id TEXT NOT NULL UNIQUE,
 			content TEXT NOT NULL DEFAULT '',
+			brief TEXT NOT NULL DEFAULT '',
+			background TEXT NOT NULL DEFAULT '',
+			key_points TEXT NOT NULL DEFAULT '',
+			progress TEXT NOT NULL DEFAULT '',
+			changes TEXT NOT NULL DEFAULT '',
+			conclusion TEXT NOT NULL DEFAULT '',
+			next_follow_up TEXT NOT NULL DEFAULT '',
 			source_utterance_count INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
@@ -129,6 +136,54 @@ func (s *Store) Init(ctx context.Context) error {
 			updated_at TEXT NOT NULL,
 			FOREIGN KEY(meeting_id) REFERENCES meetings(id)
 		);`,
+		`CREATE TABLE IF NOT EXISTS meeting_framework_sections (
+			id TEXT PRIMARY KEY,
+			meeting_id TEXT NOT NULL,
+			meeting_type TEXT NOT NULL DEFAULT 'general',
+			section_key TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL DEFAULT '',
+			source_text TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT 'auto',
+			locked INTEGER NOT NULL DEFAULT 0,
+			display_order INTEGER NOT NULL DEFAULT 0,
+			is_deleted INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			FOREIGN KEY(meeting_id) REFERENCES meetings(id)
+		);`,
+		`CREATE TABLE IF NOT EXISTS meeting_dynamic_sections (
+			id TEXT PRIMARY KEY,
+			meeting_id TEXT NOT NULL,
+			section_key TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT 'auto',
+			visibility TEXT NOT NULL DEFAULT 'hidden',
+			confidence REAL NOT NULL DEFAULT 0,
+			display_order INTEGER NOT NULL DEFAULT 0,
+			is_deleted INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			FOREIGN KEY(meeting_id) REFERENCES meetings(id)
+		);`,
+		`CREATE TABLE IF NOT EXISTS meeting_dynamic_section_items (
+			id TEXT PRIMARY KEY,
+			meeting_id TEXT NOT NULL,
+			section_id TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL DEFAULT '',
+			fields_json TEXT NOT NULL DEFAULT '',
+			source_text TEXT NOT NULL DEFAULT '',
+			confidence REAL NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'open',
+			display_order INTEGER NOT NULL DEFAULT 0,
+			is_deleted INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			FOREIGN KEY(meeting_id) REFERENCES meetings(id),
+			FOREIGN KEY(section_id) REFERENCES meeting_dynamic_sections(id)
+		);`,
 		`CREATE TABLE IF NOT EXISTS interaction_events (
 			id TEXT PRIMARY KEY,
 			meeting_id TEXT NOT NULL,
@@ -182,6 +237,9 @@ func (s *Store) Init(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_action_items_meeting_created ON meeting_action_items(meeting_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_risks_meeting_created ON meeting_risks(meeting_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_open_questions_meeting_created ON meeting_open_questions(meeting_id, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_framework_sections_meeting_order ON meeting_framework_sections(meeting_id, meeting_type, display_order, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_dynamic_sections_meeting_order ON meeting_dynamic_sections(meeting_id, display_order, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_dynamic_section_items_section_order ON meeting_dynamic_section_items(section_id, display_order, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_interaction_events_meeting_created ON interaction_events(meeting_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_interaction_undo_meeting_created ON interaction_undo_records(meeting_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_operation_journal_event_step ON operation_journal(interaction_event_id, step_index);`,
@@ -235,6 +293,13 @@ func (s *Store) ensureMeetingIntelligenceColumns(ctx context.Context) error {
 		{"meetings", "meeting_type", "TEXT NOT NULL DEFAULT 'unknown'"},
 		{"meetings", "title_locked", "INTEGER NOT NULL DEFAULT 0"},
 		{"meetings", "type_locked", "INTEGER NOT NULL DEFAULT 0"},
+		{"meeting_summaries", "brief", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_summaries", "background", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_summaries", "key_points", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_summaries", "progress", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_summaries", "changes", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_summaries", "conclusion", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_summaries", "next_follow_up", "TEXT NOT NULL DEFAULT ''"},
 		{"meeting_action_items", "task", "TEXT NOT NULL DEFAULT ''"},
 		{"meeting_action_items", "owner", "TEXT NOT NULL DEFAULT ''"},
 		{"meeting_action_items", "due_date", "TEXT NOT NULL DEFAULT ''"},
@@ -256,6 +321,8 @@ func (s *Store) ensureMeetingIntelligenceColumns(ctx context.Context) error {
 		{"meeting_open_questions", "status", "TEXT NOT NULL DEFAULT 'open'"},
 		{"meeting_open_questions", "missing_fields", "TEXT NOT NULL DEFAULT ''"},
 		{"meeting_open_questions", "source_text", "TEXT NOT NULL DEFAULT ''"},
+		{"meeting_framework_sections", "source", "TEXT NOT NULL DEFAULT 'auto'"},
+		{"meeting_framework_sections", "locked", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, item := range columns {
 		if err := s.ensureColumn(ctx, item.table, item.column, item.definition); err != nil {
@@ -459,6 +526,26 @@ func (s *Store) UpdateMeetingTitle(ctx context.Context, meetingID, title string,
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE meetings SET title = ?, title_locked = ?, updated_at = ? WHERE id = ?`,
 		title, lockedValue, nowString(), meetingID)
+	if err != nil {
+		return nil, err
+	}
+	return s.getMeetingNoLock(ctx, meetingID)
+}
+
+func (s *Store) UpdateMeetingType(ctx context.Context, meetingID, meetingType string, locked bool) (*Meeting, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	meetingType = normalizeMeetingType(meetingType)
+	if meetingType == "unknown" {
+		return nil, fmt.Errorf("meeting type is required")
+	}
+	lockedValue := 0
+	if locked {
+		lockedValue = 1
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE meetings SET type = ?, meeting_type = ?, type_locked = ?, updated_at = ? WHERE id = ?`,
+		meetingType, meetingType, lockedValue, nowString(), meetingID)
 	if err != nil {
 		return nil, err
 	}
@@ -772,16 +859,66 @@ func (s *Store) ListUtterances(ctx context.Context, meetingID string) ([]Utteran
 }
 
 func (s *Store) getMeetingSummary(ctx context.Context, meetingID string) (*MeetingSummary, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, meeting_id, content, source_utterance_count, created_at, updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT id, meeting_id, content, brief, background, key_points, progress, changes, conclusion, next_follow_up,
+		source_utterance_count, created_at, updated_at
 		FROM meeting_summaries WHERE meeting_id = ?`, meetingID)
 	var summary MeetingSummary
-	if err := row.Scan(&summary.ID, &summary.MeetingID, &summary.Content, &summary.SourceUtteranceCount, &summary.CreatedAt, &summary.UpdatedAt); err != nil {
+	var keyPointsJSON, changesJSON string
+	if err := row.Scan(&summary.ID, &summary.MeetingID, &summary.Content, &summary.Brief, &summary.Background,
+		&keyPointsJSON, &summary.Progress, &changesJSON, &summary.Conclusion, &summary.NextFollowUp,
+		&summary.SourceUtteranceCount, &summary.CreatedAt, &summary.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
 	}
+	summary.KeyPoints = decodeStringList(keyPointsJSON)
+	summary.Changes = decodeStringList(changesJSON)
+	if strings.TrimSpace(summary.Brief) == "" && strings.TrimSpace(summary.Content) != "" {
+		summary.Brief = strings.TrimSpace(summary.Content)
+	}
+	if strings.TrimSpace(summary.Content) == "" {
+		summary.Content = meetingSummaryPlainText(summary)
+	}
 	return &summary, nil
+}
+
+func decodeStringList(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	var result []string
+	if err := json.Unmarshal([]byte(value), &result); err != nil {
+		return nil
+	}
+	return uniqueNonEmptyStrings(result)
+}
+
+func meetingSummaryPlainText(summary MeetingSummary) string {
+	parts := []string{}
+	if text := strings.TrimSpace(summary.Brief); text != "" {
+		parts = append(parts, text)
+	}
+	if text := strings.TrimSpace(summary.Background); text != "" {
+		parts = append(parts, "背景："+text)
+	}
+	for _, point := range uniqueNonEmptyStrings(summary.KeyPoints) {
+		parts = append(parts, "要点："+point)
+	}
+	if text := strings.TrimSpace(summary.Progress); text != "" {
+		parts = append(parts, "进展："+text)
+	}
+	for _, change := range uniqueNonEmptyStrings(summary.Changes) {
+		parts = append(parts, "变化："+change)
+	}
+	if text := strings.TrimSpace(summary.Conclusion); text != "" {
+		parts = append(parts, "结论："+text)
+	}
+	if text := strings.TrimSpace(summary.NextFollowUp); text != "" {
+		parts = append(parts, "下次跟进："+text)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (s *Store) ListDecisions(ctx context.Context, meetingID string) ([]MeetingDecision, error) {
@@ -1228,7 +1365,7 @@ func (s *Store) MoveActionItemToDecision(ctx context.Context, meetingID, actionI
 		ID:         newID("dec"),
 		MeetingID:  meetingID,
 		Content:    decisionContent,
-		SourceText: richerText(item.SourceText, item.Task),
+		SourceText: "待办：" + item.Task,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
@@ -1300,7 +1437,7 @@ func (s *Store) MergeActionItems(ctx context.Context, meetingID string, actionIt
 	if value := strings.TrimSpace(mutation.Status); value != "" {
 		merged.Status = normalizeActionItemStatus(value)
 	} else {
-		merged.Status = normalizeActionItemStatus(merged.Status)
+		merged.Status = mergedActionItemStatus(items)
 	}
 	if value := strings.TrimSpace(mutation.SourceText); value != "" {
 		merged.SourceText = richerText(merged.SourceText, value)
@@ -1331,6 +1468,18 @@ func (s *Store) MergeActionItems(ctx context.Context, meetingID string, actionIt
 		return nil, nil, err
 	}
 	return &merged, items[1:], nil
+}
+
+func mergedActionItemStatus(items []MeetingActionItem) string {
+	if len(items) == 0 {
+		return "open"
+	}
+	for _, item := range items {
+		if normalizeActionItemStatus(item.Status) != "completed" {
+			return "open"
+		}
+	}
+	return "completed"
 }
 
 func (s *Store) CreateRisk(ctx context.Context, meetingID string, mutation RiskMutation) (*MeetingRisk, error) {
@@ -1818,26 +1967,72 @@ func (s *Store) RewriteSummary(ctx context.Context, meetingID, content string) (
 			ID:        newID("sum"),
 			MeetingID: meetingID,
 			Content:   content,
+			Brief:     content,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
 		_, err := s.db.ExecContext(ctx, `INSERT INTO meeting_summaries
-			(id, meeting_id, content, source_utterance_count, created_at, updated_at)
-			VALUES (?, ?, ?, 0, ?, ?)`,
-			summary.ID, meetingID, summary.Content, summary.CreatedAt, summary.UpdatedAt)
+			(id, meeting_id, content, brief, background, key_points, progress, changes, conclusion, next_follow_up, source_utterance_count, created_at, updated_at)
+			VALUES (?, ?, ?, ?, '', '', '', '', '', '', 0, ?, ?)`,
+			summary.ID, meetingID, summary.Content, summary.Brief, summary.CreatedAt, summary.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
 		return summary, nil
 	}
 	existing.Content = content
+	existing.Brief = content
 	existing.UpdatedAt = now
-	_, err = s.db.ExecContext(ctx, `UPDATE meeting_summaries SET content = ?, updated_at = ? WHERE meeting_id = ?`,
-		existing.Content, existing.UpdatedAt, meetingID)
+	_, err = s.db.ExecContext(ctx, `UPDATE meeting_summaries SET
+		content = ?, brief = ?, updated_at = ?
+		WHERE meeting_id = ?`,
+		existing.Content, existing.Brief, existing.UpdatedAt, meetingID)
 	if err != nil {
 		return nil, err
 	}
 	return existing, nil
+}
+
+func (s *Store) RestoreSummary(ctx context.Context, summary MeetingSummary) (*MeetingSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if strings.TrimSpace(summary.ID) == "" || strings.TrimSpace(summary.MeetingID) == "" {
+		return nil, fmt.Errorf("summary id and meeting id are required")
+	}
+	now := nowString()
+	if summary.CreatedAt == "" {
+		summary.CreatedAt = now
+	}
+	summary.UpdatedAt = now
+	if strings.TrimSpace(summary.Content) == "" {
+		summary.Content = meetingSummaryPlainText(summary)
+	}
+	if strings.TrimSpace(summary.Brief) == "" {
+		summary.Brief = strings.TrimSpace(summary.Content)
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO meeting_summaries
+		(id, meeting_id, content, brief, background, key_points, progress, changes, conclusion, next_follow_up,
+		 source_utterance_count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			content = excluded.content,
+			brief = excluded.brief,
+			background = excluded.background,
+			key_points = excluded.key_points,
+			progress = excluded.progress,
+			changes = excluded.changes,
+			conclusion = excluded.conclusion,
+			next_follow_up = excluded.next_follow_up,
+			source_utterance_count = excluded.source_utterance_count,
+			updated_at = excluded.updated_at`,
+		summary.ID, summary.MeetingID, summary.Content, summary.Brief, summary.Background,
+		encodeStringList(summary.KeyPoints), summary.Progress, encodeStringList(summary.Changes),
+		summary.Conclusion, summary.NextFollowUp, summary.SourceUtteranceCount, summary.CreatedAt, summary.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return s.getMeetingSummary(ctx, summary.MeetingID)
 }
 
 func (s *Store) getActionItem(ctx context.Context, meetingID, actionItemID string) (*MeetingActionItem, error) {
@@ -2493,7 +2688,7 @@ func mergeExistingOpenQuestionsTx(ctx context.Context, tx *sql.Tx, questions []M
 
 func matchingDecisionIndex(existing []MeetingDecision, content string) int {
 	for index, decision := range existing {
-		if similarStructuredText(decision.Content, content) {
+		if structuredTextShouldMerge(decision.Content, content) {
 			return index
 		}
 	}
@@ -2502,14 +2697,15 @@ func matchingDecisionIndex(existing []MeetingDecision, content string) int {
 
 func matchingActionItemIndex(existing []MeetingActionItem, task, owner, dueDate string) int {
 	for index, item := range existing {
-		if !similarStructuredText(item.Task, task) {
+		placeholderMatch := !similarStructuredText(item.Task, task) && structuredTextShouldMerge(item.Task, task)
+		if !similarStructuredText(item.Task, task) && !placeholderMatch {
 			continue
 		}
 		taskScore := structuredTextSimilarity(item.Task, task)
-		if !sameOptionalField(item.Owner, owner) && taskScore < 0.78 {
+		if !placeholderMatch && !sameOptionalField(item.Owner, owner) && taskScore < 0.78 {
 			continue
 		}
-		if !sameOptionalField(item.DueDate, dueDate) && normalizeForCompare(item.DueDate) != "" && normalizeForCompare(dueDate) != "" {
+		if !placeholderMatch && !sameOptionalField(item.DueDate, dueDate) && normalizeForCompare(item.DueDate) != "" && normalizeForCompare(dueDate) != "" {
 			continue
 		}
 		return index
@@ -2525,11 +2721,12 @@ func matchingActionItemIndexWithSource(existing []MeetingActionItem, task, owner
 		return -1
 	}
 	for index, item := range existing {
-		if !similarStructuredText(item.Task, task) {
+		placeholderMatch := !similarStructuredText(item.Task, task) && structuredTextShouldMerge(item.Task, task)
+		if !similarStructuredText(item.Task, task) && !placeholderMatch {
 			continue
 		}
 		taskScore := structuredTextSimilarity(item.Task, task)
-		if !sameOptionalField(item.Owner, owner) && taskScore < 0.78 {
+		if !placeholderMatch && !sameOptionalField(item.Owner, owner) && taskScore < 0.78 {
 			continue
 		}
 		return index
@@ -2550,6 +2747,9 @@ func richerText(existing, incoming string) string {
 		return existing
 	}
 	if existing == "" {
+		return incoming
+	}
+	if isStructuredPlaceholderText(existing) && !isStructuredPlaceholderText(incoming) {
 		return incoming
 	}
 	existingLen := len([]rune(normalizeForCompare(existing)))

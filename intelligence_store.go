@@ -33,6 +33,14 @@ func (s *Store) GetIntelligenceSnapshot(ctx context.Context, meetingID string) (
 	if err != nil {
 		return nil, err
 	}
+	frameworkSections, err := s.ListFrameworkSections(ctx, meetingID, meeting.MeetingType)
+	if err != nil {
+		return nil, err
+	}
+	dynamicSections, err := s.ListDynamicSections(ctx, meetingID)
+	if err != nil {
+		return nil, err
+	}
 	missingAlerts := computeMissingFieldAlerts(actionItems, risks, openQuestions)
 	return &IntelligenceSnapshot{
 		Type:               "intelligence_update",
@@ -44,6 +52,8 @@ func (s *Store) GetIntelligenceSnapshot(ctx context.Context, meetingID string) (
 		ActionItems:        actionItems,
 		Risks:              risks,
 		OpenQuestions:      openQuestions,
+		FrameworkSections:  frameworkSections,
+		DynamicSections:    dynamicSections,
 		MissingFieldAlerts: missingAlerts,
 		Timestamp:          nowString(),
 	}, nil
@@ -63,6 +73,10 @@ func (s *Store) SaveIntelligenceExtraction(ctx context.Context, meetingID string
 
 	now := nowString()
 	if err := saveMeetingMetaExtractionTx(ctx, tx, meetingID, result.Title, result.MeetingType, now); err != nil {
+		return nil, err
+	}
+	meeting, err := getMeetingTx(ctx, tx, meetingID)
+	if err != nil {
 		return nil, err
 	}
 	if err := saveSummaryExtractionTx(ctx, tx, meetingID, result.Summary, sourceUtteranceCount, now); err != nil {
@@ -117,6 +131,22 @@ func (s *Store) SaveIntelligenceExtraction(ctx context.Context, meetingID string
 		return nil, err
 	}
 
+	existingFrameworkSections, err := frameworkSectionsTx(ctx, tx, meetingID, meeting.MeetingType)
+	if err != nil {
+		return nil, err
+	}
+	if err := saveFrameworkSectionExtractionsTx(ctx, tx, meetingID, meeting.MeetingType, existingFrameworkSections, result.FrameworkSections, now); err != nil {
+		return nil, err
+	}
+
+	existingDynamicSections, err := dynamicSectionsTx(ctx, tx, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	if err := saveDynamicSectionExtractionsTx(ctx, tx, meetingID, existingDynamicSections, result.DynamicSections, now); err != nil {
+		return nil, err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -165,11 +195,12 @@ func (s *Store) CleanupIntelligenceDuplicates(ctx context.Context, meetingID str
 	return tx.Commit()
 }
 
-func saveSummaryExtractionTx(ctx context.Context, tx *sql.Tx, meetingID, summary string, sourceUtteranceCount int, now string) error {
-	summary = strings.TrimSpace(summary)
-	if summary == "" {
+func saveSummaryExtractionTx(ctx context.Context, tx *sql.Tx, meetingID string, summary SummaryExtraction, sourceUtteranceCount int, now string) error {
+	summary = normalizeSummaryExtraction(summary)
+	if summary.IsEmpty() {
 		return nil
 	}
+	content := strings.TrimSpace(summary.PlainText())
 
 	existingID := ""
 	row := tx.QueryRowContext(ctx, `SELECT id FROM meeting_summaries WHERE meeting_id = ?`, meetingID)
@@ -178,15 +209,20 @@ func saveSummaryExtractionTx(ctx context.Context, tx *sql.Tx, meetingID, summary
 	}
 	if existingID == "" {
 		_, err := tx.ExecContext(ctx, `INSERT INTO meeting_summaries
-			(id, meeting_id, content, source_utterance_count, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?)`,
-			newID("sum"), meetingID, summary, sourceUtteranceCount, now, now)
+			(id, meeting_id, content, brief, background, key_points, progress, changes, conclusion, next_follow_up,
+			 source_utterance_count, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			newID("sum"), meetingID, content, summary.Brief, summary.Background, encodeStringList(summary.KeyPoints),
+			summary.Progress, encodeStringList(summary.Changes), summary.Conclusion, summary.NextFollowUp,
+			sourceUtteranceCount, now, now)
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `UPDATE meeting_summaries SET
-		content = ?, source_utterance_count = ?, updated_at = ?
+		content = ?, brief = ?, background = ?, key_points = ?, progress = ?, changes = ?, conclusion = ?, next_follow_up = ?,
+		source_utterance_count = ?, updated_at = ?
 		WHERE meeting_id = ?`,
-		summary, sourceUtteranceCount, now, meetingID)
+		content, summary.Brief, summary.Background, encodeStringList(summary.KeyPoints), summary.Progress,
+		encodeStringList(summary.Changes), summary.Conclusion, summary.NextFollowUp, sourceUtteranceCount, now, meetingID)
 	return err
 }
 

@@ -187,6 +187,42 @@ func similarStructuredText(left, right string) bool {
 	return minLen >= 12 && score >= 0.55
 }
 
+func structuredTextShouldMerge(left, right string) bool {
+	if similarStructuredText(left, right) {
+		return true
+	}
+	return isStructuredPlaceholderText(left) && !isStructuredPlaceholderText(right) && normalizeForCompare(right) != ""
+}
+
+func isStructuredPlaceholderText(value string) bool {
+	key := normalizeForCompare(value)
+	if key == "" {
+		return false
+	}
+	phrases := []string{
+		"补充一条",
+		"新增一条",
+		"添加一条",
+		"追加一条",
+		"记录一条",
+		"创建一条",
+		"加一条",
+		"待补充",
+		"待完善",
+		"需要补充",
+		"后续补充",
+		"先占位",
+		"暂定",
+		"待定",
+	}
+	for _, phrase := range phrases {
+		if strings.Contains(key, normalizeForCompare(phrase)) {
+			return true
+		}
+	}
+	return false
+}
+
 func structuredTextSimilarity(left, right string) float64 {
 	return ngramJaccard(normalizeForCompare(left), normalizeForCompare(right), 2)
 }

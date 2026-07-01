@@ -102,11 +102,21 @@ func (s *Server) buildMeetingMinutes(ctx context.Context, meetingID string) (str
 	b.WriteString("\n")
 
 	b.WriteString("## 会议摘要\n\n")
-	if snapshot.Summary != nil && strings.TrimSpace(snapshot.Summary.Content) != "" {
-		b.WriteString(strings.TrimSpace(snapshot.Summary.Content))
-		b.WriteString("\n\n")
+	if snapshot.Summary != nil && summaryHasContent(snapshot.Summary) {
+		writeStructuredSummaryMarkdown(&b, snapshot.Summary)
 	} else {
 		b.WriteString("暂无摘要。\n\n")
+	}
+
+	if len(snapshot.FrameworkSections) > 0 {
+		b.WriteString("## 会议记录框架\n\n")
+		for _, section := range snapshot.FrameworkSections {
+			content := strings.TrimSpace(section.Content)
+			if content == "" {
+				content = "暂无明确内容。"
+			}
+			fmt.Fprintf(&b, "### %s\n\n%s\n\n", markdownLine(section.Title), markdownLine(content))
+		}
 	}
 
 	b.WriteString("## 会议决策\n\n")
@@ -189,6 +199,59 @@ func (s *Server) buildMeetingMinutes(ctx context.Context, meetingID string) (str
 		meta += " · 结束时间：" + formatMinutesTime(meeting.EndedAt)
 	}
 	return markdown, meetingMinutesPage{Title: title, Meta: meta, Markdown: markdown}, nil
+}
+
+func summaryHasContent(summary *MeetingSummary) bool {
+	if summary == nil {
+		return false
+	}
+	return strings.TrimSpace(summary.Content) != "" ||
+		strings.TrimSpace(summary.Brief) != "" ||
+		strings.TrimSpace(summary.Background) != "" ||
+		len(uniqueNonEmptyStrings(summary.KeyPoints)) > 0 ||
+		strings.TrimSpace(summary.Progress) != "" ||
+		len(uniqueNonEmptyStrings(summary.Changes)) > 0 ||
+		strings.TrimSpace(summary.Conclusion) != "" ||
+		strings.TrimSpace(summary.NextFollowUp) != ""
+}
+
+func writeStructuredSummaryMarkdown(b *bytes.Buffer, summary *MeetingSummary) {
+	if summary == nil {
+		return
+	}
+	if text := strings.TrimSpace(summary.Brief); text != "" {
+		b.WriteString(markdownLine(text))
+		b.WriteString("\n\n")
+	} else if text := strings.TrimSpace(summary.Content); text != "" {
+		b.WriteString(markdownLine(text))
+		b.WriteString("\n\n")
+	}
+	writeMarkdownSummaryField(b, "背景", summary.Background)
+	writeMarkdownSummaryList(b, "关键要点", summary.KeyPoints)
+	writeMarkdownSummaryField(b, "当前进展", summary.Progress)
+	writeMarkdownSummaryList(b, "重要变化", summary.Changes)
+	writeMarkdownSummaryField(b, "当前结论", summary.Conclusion)
+	writeMarkdownSummaryField(b, "下次跟进", summary.NextFollowUp)
+	b.WriteString("\n")
+}
+
+func writeMarkdownSummaryField(b *bytes.Buffer, label, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	fmt.Fprintf(b, "- **%s**：%s\n", markdownLine(label), markdownLine(value))
+}
+
+func writeMarkdownSummaryList(b *bytes.Buffer, label string, values []string) {
+	values = uniqueNonEmptyStrings(values)
+	if len(values) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "- **%s**：\n", markdownLine(label))
+	for _, value := range values {
+		fmt.Fprintf(b, "  - %s\n", markdownLine(value))
+	}
 }
 
 func (s *Server) meetingShareURL(r *http.Request, meetingID string) string {
