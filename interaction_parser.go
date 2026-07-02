@@ -341,31 +341,67 @@ func cleanupCorrectionValue(value string) string {
 }
 
 func parseUndoLocally(instruction string) (InteractionCommand, bool) {
-	key := normalizeForCompare(instruction)
-	if key == "" {
+	if !isPrimaryUndoInstruction(instruction) {
 		return InteractionCommand{}, false
 	}
-	undoPhrases := []string{
-		"撤销",
-		"撤回",
-		"恢复上一步",
-		"取消刚刚",
-		"还原刚刚",
-		"undo",
-		"revert",
+	return InteractionCommand{
+		Intent:      "undo_last_interaction",
+		TargetType:  "interaction",
+		Confidence:  0.88,
+		NeedConfirm: false,
+		Reply:       "已识别为撤销上一步会中交互操作。",
+	}, true
+}
+
+func isPrimaryUndoInstruction(instruction string) bool {
+	key := normalizeForCompare(instruction)
+	if key == "" {
+		return false
 	}
-	for _, phrase := range undoPhrases {
-		if strings.Contains(key, normalizeForCompare(phrase)) {
-			return InteractionCommand{
-				Intent:      "undo_last_interaction",
-				TargetType:  "interaction",
-				Confidence:  0.8,
-				NeedConfirm: false,
-				Reply:       "已识别为撤销上一步会中交互操作。",
-			}, true
+	key = trimNormalizedPoliteLead(key)
+	switch key {
+	case "撤销", "撤回", "撤销操作", "撤回操作", "undo", "revert":
+		return true
+	}
+	prefixes := []string{
+		"撤销刚刚", "撤销刚才", "撤销上一条", "撤销上一步", "撤销上次", "撤销最近", "撤销前一步",
+		"撤回刚刚", "撤回刚才", "撤回上一条", "撤回上一步", "撤回上次", "撤回最近", "撤回前一步",
+		"取消刚刚", "取消刚才", "取消上一条", "取消上一步", "取消上次", "取消最近",
+		"还原刚刚", "还原刚才", "还原上一条", "还原上一步", "还原上次",
+		"恢复上一步", "恢复上一条", "恢复刚才", "恢复刚刚",
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(key, normalizeForCompare(prefix)) {
+			return true
 		}
 	}
-	return InteractionCommand{}, false
+	phrases := []string{
+		"刚刚的操作撤销", "刚才的操作撤销", "上一条操作撤销", "上一步操作撤销",
+		"刚刚的操作撤回", "刚才的操作撤回", "上一条操作撤回", "上一步操作撤回",
+		"把刚刚的操作撤销", "把刚才的操作撤销", "把上一条操作撤销", "把上一步操作撤销",
+	}
+	for _, phrase := range phrases {
+		if strings.Contains(key, normalizeForCompare(phrase)) {
+			return true
+		}
+	}
+	return false
+}
+
+func trimNormalizedPoliteLead(key string) string {
+	for {
+		changed := false
+		for _, prefix := range []string{"帮我", "请帮我", "请", "麻烦", "麻烦你", "小艾", "小爱"} {
+			normalized := normalizeForCompare(prefix)
+			if strings.HasPrefix(key, normalized) {
+				key = strings.TrimPrefix(key, normalized)
+				changed = true
+			}
+		}
+		if !changed {
+			return key
+		}
+	}
 }
 
 func parseMeetingTitleLocally(instruction string) (InteractionCommand, bool) {
@@ -948,7 +984,8 @@ func parseDynamicSectionMutationLocally(instruction string, snapshot *Intelligen
 		sections = snapshot.DynamicSections
 	}
 
-	if containsNormalizedPhrase(key, "修改", "更新", "调整", "改一下", "改成", "改为", "重写", "改名", "重命名", "命名为") {
+	isCreateDynamicSection := containsNormalizedPhrase(key, "新增", "创建", "新建", "添加")
+	if !isCreateDynamicSection && containsNormalizedPhrase(key, "修改", "更新", "调整", "改一下", "改成", "改为", "重写", "改名", "重命名", "命名为") {
 		targetIndex, targetSection := matchDynamicSectionFromInstruction(key, text, sections)
 		if targetSection == nil {
 			return InteractionCommand{}, false
@@ -1029,7 +1066,7 @@ func parseDynamicSectionMutationLocally(instruction string, snapshot *Intelligen
 		}, true
 	}
 
-	if !containsNormalizedPhrase(key, "新增", "创建", "新建", "添加") {
+	if !isCreateDynamicSection {
 		return InteractionCommand{}, false
 	}
 	title := extractDynamicSectionTitle(text)
@@ -1053,14 +1090,24 @@ func parseDynamicSectionMutationLocally(instruction string, snapshot *Intelligen
 }
 
 func extractDynamicSectionTitle(text string) string {
+	if title := extractDynamicSectionTitleAfterMarkers(text, []string{
+		"动态模块叫做", "动态模块叫", "动态模块命名为", "动态模块名字叫", "动态模块名称叫",
+		"自定义模块叫做", "自定义模块叫", "自定义模块命名为", "自定义模块名字叫", "自定义模块名称叫",
+		"发现模块叫做", "发现模块叫", "发现模块命名为", "发现模块名字叫", "发现模块名称叫",
+		"模块叫做", "模块叫", "模块命名为", "模块名字叫", "模块名称叫",
+		"栏目叫做", "栏目叫", "栏目命名为", "板块叫做", "板块叫", "专题叫做", "专题叫",
+	}); title != "" {
+		return title
+	}
 	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?:新增|创建|新建|添加)(?:一个|一条|1个|个)?(?:叫做|叫|命名为|名字叫|名称叫)(.+?)(?:的)?(?:动态模块|自定义模块|发现模块|模块|栏目|板块|专题)?$`),
 		regexp.MustCompile(`(?:新增|创建|新建|添加)(?:一个|1个|个)?(.+?)(?:动态模块|自定义模块|发现模块|模块|栏目|板块|专题)`),
 		regexp.MustCompile(`(?:把|将)(.+?)(?:作为|设为|做成)(?:动态模块|自定义模块|发现模块|模块|栏目|板块|专题)`),
 	}
 	for _, pattern := range patterns {
 		matches := pattern.FindStringSubmatch(text)
 		if len(matches) >= 2 {
-			if title := cleanupDynamicSectionTitle(matches[1]); title != "" {
+			if title := cleanupDynamicSectionTitle(matches[1]); title != "" && !isGenericDynamicSectionTitle(title) {
 				return title
 			}
 		}
@@ -1081,7 +1128,22 @@ func cleanupDynamicSectionTitle(value string) string {
 		value = strings.TrimSpace(value)
 		value = strings.Trim(value, "，。！？、；;,.!?：: ")
 	}
+	for _, prefix := range []string{"叫做", "叫", "命名为", "名字叫", "名称叫", "标题叫"} {
+		value = strings.TrimPrefix(value, prefix)
+		value = strings.TrimSpace(value)
+		value = strings.Trim(value, "，。！？、；;,.!?：: ")
+	}
 	return value
+}
+
+func isGenericDynamicSectionTitle(value string) bool {
+	key := normalizeForCompare(value)
+	switch key {
+	case "", "动态", "自定义", "发现", "模块", "动态模块", "自定义模块", "发现模块", "栏目", "板块", "专题", "一个", "一条":
+		return true
+	default:
+		return false
+	}
 }
 
 func extractDynamicSectionCreateContent(text string) string {
@@ -1091,10 +1153,24 @@ func extractDynamicSectionCreateContent(text string) string {
 	}
 	for _, marker := range []string{"动态模块", "自定义模块", "发现模块", "模块", "栏目", "板块", "专题"} {
 		if index := strings.LastIndex(text, marker); index >= 0 {
-			return cleanupDynamicSectionValue(text[index+len(marker):])
+			tail := strings.TrimSpace(text[index+len(marker):])
+			tail = strings.TrimLeft(tail, "，。！？、；;,.!?：: ")
+			if startsWithAny(tail, "叫做", "叫", "命名为", "名字叫", "名称叫", "标题叫") {
+				return ""
+			}
+			return cleanupDynamicSectionValue(tail)
 		}
 	}
 	return ""
+}
+
+func startsWithAny(value string, prefixes ...string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractDynamicSectionItemContent(text string) string {

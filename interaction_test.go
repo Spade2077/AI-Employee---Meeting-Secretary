@@ -997,6 +997,44 @@ func TestLocalDecisionParserUpdatesFirstDecision(t *testing.T) {
 	}
 }
 
+func TestDecisionUpdateWithUndoWordDoesNotTriggerUndo(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	first, err := store.CreateDecision(ctx, meetingID, "第一版演示先使用云端 ASR。", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateDecision(ctx, meetingID, "现场网络异常时使用预录文本兜底。", "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	command, _, err := server.parseInteractionCommand(ctx, meetingID, "把第一条决策改为正式演示，优先展示会中语音和修改撤销能力", newInteractionTiming(interactionTimingSeed{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Intent == "undo_last_interaction" {
+		t.Fatalf("expected decision update, not undo: %#v", command)
+	}
+	if command.Intent != "update_decision" || command.TargetIndex != 1 || command.TargetID != first.ID {
+		t.Fatalf("expected first decision update command, got %#v", command)
+	}
+	if !strings.Contains(command.Content, "撤销能力") {
+		t.Fatalf("expected undo word to stay in decision content, got %#v", command)
+	}
+}
+
+func TestUndoParserRequiresUndoAsPrimaryAction(t *testing.T) {
+	if command, ok := parseUndoLocally("把第一条决策改成支持修改撤销能力"); ok || command.Intent == "undo_last_interaction" {
+		t.Fatalf("expected embedded undo word to be treated as content, got %#v", command)
+	}
+	command, ok := parseUndoLocally("撤销刚刚的操作")
+	if !ok || command.Intent != "undo_last_interaction" {
+		t.Fatalf("expected explicit undo command, got ok=%v command=%#v", ok, command)
+	}
+}
+
 func TestInteractionCommandWaitsForStableTranscript(t *testing.T) {
 	ctx := context.Background()
 	store, meetingID := newInteractionStore(t, ctx)
@@ -1697,6 +1735,27 @@ func TestDynamicSectionTitleKeepsCostPrefix(t *testing.T) {
 	}
 	if command.SectionTitle != "成本控制" {
 		t.Fatalf("expected 成本控制 title, got %#v", command)
+	}
+}
+
+func TestDynamicSectionTitleAfterModuleNameMarker(t *testing.T) {
+	cases := []string{
+		"新增一个动态模块叫观众反馈",
+		"新增一个模块叫观众反馈",
+		"新增一个动态模块命名为观众反馈",
+		"新增一个叫观众反馈的动态模块",
+	}
+	for _, instruction := range cases {
+		command, ok := parseDynamicSectionMutationLocally(instruction, &IntelligenceSnapshot{})
+		if !ok {
+			t.Fatalf("expected dynamic section command for %q", instruction)
+		}
+		if command.Intent != "create_dynamic_section" || command.SectionTitle != "观众反馈" || command.Title != "观众反馈" {
+			t.Fatalf("expected title 观众反馈 for %q, got %#v", instruction, command)
+		}
+		if command.Content != "" {
+			t.Fatalf("expected empty content for title-only command %q, got %#v", instruction, command)
+		}
 	}
 }
 
