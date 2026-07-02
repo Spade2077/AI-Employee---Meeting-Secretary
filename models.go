@@ -298,6 +298,17 @@ type InteractionStatusUpdate struct {
 	Timestamp string `json:"timestamp"`
 }
 
+type InteractionModeUpdate struct {
+	Type             string `json:"type"`
+	MeetingID        string `json:"meetingId"`
+	Mode             string `json:"mode"`
+	Active           bool   `json:"active"`
+	ExpiresAt        string `json:"expiresAt,omitempty"`
+	RemainingSeconds int    `json:"remainingSeconds"`
+	Reason           string `json:"reason,omitempty"`
+	Timestamp        string `json:"timestamp"`
+}
+
 type TranscriptDelta struct {
 	Type      string     `json:"type"`
 	MeetingID string     `json:"meetingId"`

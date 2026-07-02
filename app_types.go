@@ -39,6 +39,8 @@ type Server struct {
 	intelTimers         map[string]*time.Timer
 	interactionMu       sync.Mutex
 	pendingInteractions map[string]*PendingInteraction
+	recentInteractions  map[string][]recentInteractionTranscript
+	interactionModes    map[string]*InteractionModeState
 	sttMu               sync.Mutex
 	sttSeenAt           map[string]time.Time
 	sttResultAt         map[string]time.Time

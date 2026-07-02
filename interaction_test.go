@@ -150,6 +150,40 @@ func TestMeetingInteractionConsumesSplitWakeAndInstruction(t *testing.T) {
 	}
 }
 
+func TestInteractionEditModeConsumesCommandsUntilExit(t *testing.T) {
+	server := &Server{
+		hub:                 NewHub(),
+		pendingInteractions: map[string]*PendingInteraction{},
+		recentInteractions:  map[string][]recentInteractionTranscript{},
+		interactionModes:    map[string]*InteractionModeState{},
+	}
+	meetingID := "m_edit_mode"
+
+	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "小艾小艾，进入修改模式", IsFinal: true, Provider: "test"}) {
+		t.Fatal("expected enter edit mode command to be consumed")
+	}
+	if !server.interactionEditModeActive(meetingID, time.Now()) {
+		t.Fatal("expected edit mode to be active")
+	}
+	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "把第一条待确认问题改成客户是否允许外网接入", IsFinal: true, Provider: "test"}) {
+		t.Fatal("expected edit-mode instruction to be consumed")
+	}
+
+	server.interactionMu.Lock()
+	server.cancelPendingInteractionLocked(meetingID)
+	server.interactionMu.Unlock()
+
+	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "退出修改模式", IsFinal: true, Provider: "test"}) {
+		t.Fatal("expected exit edit mode command to be consumed")
+	}
+	if server.interactionEditModeActive(meetingID, time.Now()) {
+		t.Fatal("expected edit mode to be inactive after exit")
+	}
+	if server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "这句话应该进入全文转写", IsFinal: true, Provider: "test"}) {
+		t.Fatal("expected normal speech to stop being consumed after exit")
+	}
+}
+
 func TestInteractionCommandExecutionCoversSupportedIntents(t *testing.T) {
 	ctx := context.Background()
 	store, meetingID := newInteractionStore(t, ctx)
@@ -1388,6 +1422,81 @@ func TestInteractionCommandDeletesAndMergesDynamicSections(t *testing.T) {
 	}
 }
 
+func TestDynamicSectionMergeUsesOnlyExplicitSources(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	first, err := store.CreateDynamicSection(ctx, meetingID, "预算约束", "", "记录预算边界", "云服务费用先控制在三千以内", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.CreateDynamicSection(ctx, meetingID, "供应商限制", "", "记录供应商侧限制", "临时采购需要主管确认", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := store.CreateDynamicSection(ctx, meetingID, "成本控制", "", "记录成本侧约束", "差旅成本先不扩大", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	command, _, err := server.parseInteractionCommand(ctx, meetingID, "把第一条和第二条动态模块合并为一条，改名为成本控制结果", newInteractionTiming(interactionTimingSeed{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Intent != "merge_dynamic_sections" {
+		t.Fatalf("expected merge dynamic sections intent, got %#v", command)
+	}
+	if len(command.SourceIDs) != 2 || command.SourceIDs[0] != first.ID || command.SourceIDs[1] != second.ID {
+		t.Fatalf("expected only first and second source IDs, got %#v", command)
+	}
+	if command.SectionTitle != "成本控制结果" {
+		t.Fatalf("expected merge title 成本控制结果, got %#v", command)
+	}
+
+	snapshot, _, err := server.executeInteractionCommand(ctx, meetingID, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 2 {
+		t.Fatalf("expected two dynamic sections after merge, got %#v", snapshot.DynamicSections)
+	}
+	if !containsDynamicSectionTitle(snapshot.DynamicSections, "成本控制结果") {
+		t.Fatalf("expected merged section title, got %#v", snapshot.DynamicSections)
+	}
+	if !containsDynamicSectionID(snapshot.DynamicSections, third.ID) {
+		t.Fatalf("expected unrelated cost section to remain, got %#v", snapshot.DynamicSections)
+	}
+}
+
+func TestDynamicSectionRenameAndCleanupAreGeneric(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	section, err := store.CreateDynamicSection(ctx, meetingID, "本控制", "", "旧识别结果", "", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command, _, err := server.parseInteractionCommand(ctx, meetingID, "把第一个动态模块改名为成本控制", newInteractionTiming(interactionTimingSeed{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Intent != "update_dynamic_section" || command.TargetID != section.ID || command.Title != "成本控制" {
+		t.Fatalf("expected dynamic section rename command, got %#v", command)
+	}
+	snapshot, _, err := server.executeInteractionCommand(ctx, meetingID, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.DynamicSections) != 1 || snapshot.DynamicSections[0].Title != "成本控制" {
+		t.Fatalf("expected section renamed to 成本控制, got %#v", snapshot.DynamicSections)
+	}
+	if got := cleanupDynamicSectionValue("成本控制模块要记录预算上限"); !strings.HasPrefix(got, "成本控制") {
+		t.Fatalf("expected cleanup to keep 成本 prefix, got %q", got)
+	}
+}
+
 func TestDynamicSectionVoiceSourceTextIsGeneric(t *testing.T) {
 	ctx := context.Background()
 	store, meetingID := newInteractionStore(t, ctx)
@@ -1473,6 +1582,96 @@ func TestLocalOpenQuestionParserBeatsRiskFallback(t *testing.T) {
 		if risk.DueDate == "周三下午" {
 			t.Fatalf("expected risks to stay unchanged, got %#v", snapshot.Risks)
 		}
+	}
+}
+
+func TestLocalOpenQuestionParserDeletesMultipleExplicitTargets(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	third, err := store.CreateOpenQuestion(ctx, meetingID, OpenQuestionMutation{Question: "第三条需要确认", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fourth, err := store.CreateOpenQuestion(ctx, meetingID, OpenQuestionMutation{Question: "第四条需要确认", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fifth, err := store.CreateOpenQuestion(ctx, meetingID, OpenQuestionMutation{Question: "第五条应该保留", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	command, _, err := server.parseInteractionCommand(ctx, meetingID, "删除第 3 和第 4 条待确认问题", newInteractionTiming(interactionTimingSeed{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Intent != "delete_open_questions" || len(command.SourceIDs) != 2 {
+		t.Fatalf("expected bulk open question delete, got %#v", command)
+	}
+	snapshot, _, err := server.executeInteractionCommand(ctx, meetingID, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsOpenQuestion(snapshot.OpenQuestions, third.Question) || containsOpenQuestion(snapshot.OpenQuestions, fourth.Question) {
+		t.Fatalf("expected third and fourth questions deleted, got %#v", snapshot.OpenQuestions)
+	}
+	if !containsOpenQuestion(snapshot.OpenQuestions, fifth.Question) {
+		t.Fatalf("expected fifth question to remain, got %#v", snapshot.OpenQuestions)
+	}
+}
+
+func TestDynamicSectionTitleKeepsCostPrefix(t *testing.T) {
+	command, ok := parseDynamicSectionMutationLocally("新增一个成本控制模块。", &IntelligenceSnapshot{})
+	if !ok {
+		t.Fatal("expected dynamic section command")
+	}
+	if command.SectionTitle != "成本控制" {
+		t.Fatalf("expected 成本控制 title, got %#v", command)
+	}
+}
+
+func TestRecentInteractionEchoIsConsumedAfterCommandFires(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{
+		store:               store,
+		hub:                 NewHub(),
+		pendingInteractions: map[string]*PendingInteraction{},
+		recentInteractions:  map[string][]recentInteractionTranscript{},
+	}
+
+	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "小艾小艾，新增一个成本控制模块", IsFinal: true, Provider: "test"}) {
+		t.Fatal("expected wake command to be consumed")
+	}
+	waitFor(t, time.Second, func() bool {
+		events, err := store.ListInteractionEvents(ctx, meetingID)
+		return err == nil && len(events) == 1
+	})
+	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "新增一个成本控制模块", IsFinal: true, Provider: "test"}) {
+		t.Fatal("expected late ASR echo to be consumed")
+	}
+}
+
+func TestInteractionLikeExtractionIsNotStoredAsOpenQuestion(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+
+	if _, err := store.SaveIntelligenceExtraction(ctx, meetingID, IntelligenceExtraction{
+		OpenQuestions: []OpenQuestionExtraction{
+			{Question: "把第四条待确认问题的截止时间改为周三下午", SourceText: "把第四条待确认问题的截止时间改为周三下午", Status: "open"},
+			{Question: "删除第 4 和第 5 条待确认问题", SourceText: "删除第 4 和第 5 条待确认问题", Status: "open"},
+		},
+	}, 3); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.GetIntelligenceSnapshot(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsOpenQuestion(snapshot.OpenQuestions, "把第四条待确认问题") || containsOpenQuestion(snapshot.OpenQuestions, "删除第 4") {
+		t.Fatalf("expected interaction-like open questions to be skipped, got %#v", snapshot.OpenQuestions)
 	}
 }
 
@@ -1609,6 +1808,90 @@ func TestDynamicSectionPlaceholderItemIsUpdatedInPlace(t *testing.T) {
 	}
 	if len(sections) != 1 || len(sections[0].Items) != 1 || !strings.Contains(sections[0].Items[0].Content, "3,000") {
 		t.Fatalf("expected placeholder dynamic item to be updated in place, got %#v", sections)
+	}
+}
+
+func TestOpenQuestionCreateKeepsShiFouAndDeduplicates(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+	before, err := store.ListOpenQuestions(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	command, _, err := server.parseInteractionCommand(ctx, meetingID, "新增一个待确认问题，客户现场是否允许接入外网？", newInteractionTiming(interactionTimingSeed{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Intent != "create_open_question" || !strings.Contains(command.Question, "是否允许接入外网") {
+		t.Fatalf("expected open question create command with 是否, got %#v", command)
+	}
+	snapshot, _, err := server.executeInteractionCommand(ctx, meetingID, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.OpenQuestions) != len(before)+1 || !containsOpenQuestion(snapshot.OpenQuestions, "客户现场是否允许接入外网") {
+		t.Fatalf("expected one complete open question, got %#v", snapshot.OpenQuestions)
+	}
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.OpenQuestions) != len(before)+1 {
+		t.Fatalf("expected repeated command to stay deduplicated, got %#v", snapshot.OpenQuestions)
+	}
+}
+
+func TestDynamicSectionShortItemIsMergedWithExpandedItem(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+
+	section, err := store.CreateDynamicSection(ctx, meetingID, "硬件设备", "", "记录硬件依赖", "", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AddDynamicSectionItem(ctx, meetingID, section.ID, "", "硬件设备", dynamicSectionVoiceSourceText); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AddDynamicSectionItem(ctx, meetingID, section.ID, "", "硬件设备周五前到齐", dynamicSectionVoiceSourceText); err != nil {
+		t.Fatal(err)
+	}
+	sections, err := store.ListDynamicSections(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sections) != 1 || len(sections[0].Items) != 1 || !strings.Contains(sections[0].Items[0].Content, "周五前到齐") {
+		t.Fatalf("expected expanded dynamic item to replace short item, got %#v", sections)
+	}
+}
+
+func TestCleanupMergesExistingDynamicSectionDuplicates(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+
+	section, err := store.CreateDynamicSection(ctx, meetingID, "硬件设备", "", "记录硬件依赖", "", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := nowString()
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO meeting_dynamic_section_items
+		(id, meeting_id, section_id, title, content, fields_json, source_text, confidence, status, display_order, is_deleted, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, '', ?, 1, 'open', 1, 0, ?, ?),
+			(?, ?, ?, ?, ?, '', ?, 1, 'open', 2, 0, ?, ?)`,
+		newID("secitem"), meetingID, section.ID, "硬件设备", "硬件设备", dynamicSectionVoiceSourceText, now, now,
+		newID("secitem"), meetingID, section.ID, "硬件设备周五前到齐", "硬件设备周五前到齐", dynamicSectionVoiceSourceText, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CleanupIntelligenceDuplicates(ctx, meetingID); err != nil {
+		t.Fatal(err)
+	}
+	sections, err := store.ListDynamicSections(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sections) != 1 || len(sections[0].Items) != 1 || !strings.Contains(sections[0].Items[0].Content, "周五前到齐") {
+		t.Fatalf("expected cleanup to merge existing dynamic duplicates, got %#v", sections)
 	}
 }
 
@@ -1820,6 +2103,24 @@ func containsRiskContent(risks []MeetingRisk, text string) bool {
 func containsOpenQuestion(questions []MeetingOpenQuestion, text string) bool {
 	for _, question := range questions {
 		if strings.Contains(question.Question, text) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsDynamicSectionTitle(sections []MeetingDynamicSection, title string) bool {
+	for _, section := range sections {
+		if section.Title == title {
+			return true
+		}
+	}
+	return false
+}
+
+func containsDynamicSectionID(sections []MeetingDynamicSection, id string) bool {
+	for _, section := range sections {
+		if section.ID == id {
 			return true
 		}
 	}

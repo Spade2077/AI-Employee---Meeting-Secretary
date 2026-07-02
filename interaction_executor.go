@@ -176,6 +176,29 @@ func (s *Server) executeInteractionCommandWithEventID(ctx context.Context, meeti
 		if mutation.Task == "" {
 			return nil, "没有识别到新待办内容。", fmt.Errorf("create action item missing task")
 		}
+		if existing, err := s.store.ListActionItems(ctx, meetingID); err != nil {
+			return nil, "读取现有待办失败。", err
+		} else if index := matchingActionItemIndexWithSource(existing, mutation.Task, mutation.Owner, mutation.DueDate, mutation.SourceText); index >= 0 {
+			item := existing[index]
+			updatedTask := richerText(item.Task, mutation.Task)
+			shouldUpdate := updatedTask != item.Task ||
+				(strings.TrimSpace(mutation.Owner) != "" && normalizeForCompare(item.Owner) != normalizeForCompare(mutation.Owner)) ||
+				(strings.TrimSpace(mutation.DueDate) != "" && normalizeForCompare(item.DueDate) != normalizeForCompare(mutation.DueDate)) ||
+				(strings.TrimSpace(mutation.Status) != "" && normalizeForCompare(item.Status) != normalizeForCompare(mutation.Status))
+			if !shouldUpdate {
+				return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已存在相似待办，未重复新增：%s", item.Task))
+			}
+			mutation.Task = updatedTask
+			updated, err := s.store.UpdateActionItem(ctx, meetingID, item.ID, mutation)
+			if err != nil {
+				return nil, "更新已有待办失败。", err
+			}
+			s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{
+				Type:       "restore_action_item",
+				ActionItem: &item,
+			})
+			return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已更新已有待办，避免重复新增：%s", updated.Task))
+		}
 		created, err := s.store.CreateActionItem(ctx, meetingID, mutation)
 		if err != nil {
 			return nil, "创建待办失败。", err
@@ -277,6 +300,24 @@ func (s *Server) executeInteractionCommandWithEventID(ctx context.Context, meeti
 		if content == "" {
 			return nil, "No decision content found.", fmt.Errorf("create decision missing content")
 		}
+		if existing, err := s.store.ListDecisions(ctx, meetingID); err != nil {
+			return nil, "Read decisions failed.", err
+		} else if index := matchingDecisionIndex(existing, content); index >= 0 {
+			decision := existing[index]
+			updatedContent := richerText(decision.Content, content)
+			if updatedContent == decision.Content {
+				return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("Decision already exists: %s", decision.Content))
+			}
+			updated, err := s.store.UpdateDecision(ctx, meetingID, decision.ID, updatedContent)
+			if err != nil {
+				return nil, "Update existing decision failed.", err
+			}
+			s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{
+				Type:     "restore_decision",
+				Decision: &decision,
+			})
+			return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("Updated existing decision to avoid duplicate: %s", updated.Content))
+		}
 		created, err := s.store.CreateDecision(ctx, meetingID, content, command.Reason)
 		if err != nil {
 			return nil, "Create decision failed.", err
@@ -331,6 +372,30 @@ func (s *Server) executeInteractionCommandWithEventID(ctx context.Context, meeti
 		mutation := riskMutationFromCommand(command)
 		if mutation.Content == "" {
 			return nil, "没有识别到新风险内容。", fmt.Errorf("create risk missing content")
+		}
+		if existing, err := s.store.ListRisks(ctx, meetingID); err != nil {
+			return nil, "读取现有风险失败。", err
+		} else if index := matchingRiskIndex(existing, mutation.Content); index >= 0 {
+			risk := existing[index]
+			updatedContent := richerText(risk.Content, mutation.Content)
+			shouldUpdate := updatedContent != risk.Content ||
+				(strings.TrimSpace(mutation.Owner) != "" && normalizeForCompare(risk.Owner) != normalizeForCompare(mutation.Owner)) ||
+				(strings.TrimSpace(mutation.Mitigation) != "" && normalizeForCompare(risk.Mitigation) != normalizeForCompare(mutation.Mitigation)) ||
+				(strings.TrimSpace(mutation.DueDate) != "" && normalizeForCompare(risk.DueDate) != normalizeForCompare(mutation.DueDate)) ||
+				(strings.TrimSpace(mutation.Status) != "" && normalizeForCompare(risk.Status) != normalizeForCompare(mutation.Status))
+			if !shouldUpdate {
+				return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已存在相似风险，未重复新增：%s", risk.Content))
+			}
+			mutation.Content = updatedContent
+			updated, err := s.store.UpdateRisk(ctx, meetingID, risk.ID, mutation)
+			if err != nil {
+				return nil, "更新已有风险失败。", err
+			}
+			s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{
+				Type: "restore_risk",
+				Risk: &risk,
+			})
+			return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已更新已有风险，避免重复新增：%s", updated.Content))
 		}
 		created, err := s.store.CreateRisk(ctx, meetingID, mutation)
 		if err != nil {
@@ -395,6 +460,29 @@ func (s *Server) executeInteractionCommandWithEventID(ctx context.Context, meeti
 		if mutation.Question == "" {
 			return nil, "没有识别到新的待确认问题。", fmt.Errorf("create open question missing question")
 		}
+		if existing, err := s.store.ListOpenQuestions(ctx, meetingID); err != nil {
+			return nil, "读取现有待确认问题失败。", err
+		} else if index := matchingOpenQuestionIndex(existing, mutation.Question); index >= 0 {
+			question := existing[index]
+			updatedQuestion := richerText(question.Question, mutation.Question)
+			shouldUpdate := updatedQuestion != question.Question ||
+				(strings.TrimSpace(mutation.Owner) != "" && normalizeForCompare(question.Owner) != normalizeForCompare(mutation.Owner)) ||
+				(strings.TrimSpace(mutation.DueDate) != "" && normalizeForCompare(question.DueDate) != normalizeForCompare(mutation.DueDate)) ||
+				(strings.TrimSpace(mutation.Status) != "" && normalizeForCompare(question.Status) != normalizeForCompare(mutation.Status))
+			if !shouldUpdate {
+				return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已存在相似待确认问题，未重复新增：%s", question.Question))
+			}
+			mutation.Question = updatedQuestion
+			updated, err := s.store.UpdateOpenQuestion(ctx, meetingID, question.ID, mutation)
+			if err != nil {
+				return nil, "更新已有待确认问题失败。", err
+			}
+			s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{
+				Type:         "restore_open_question",
+				OpenQuestion: &question,
+			})
+			return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已更新已有待确认问题，避免重复新增：%s", updated.Question))
+		}
 		created, err := s.store.CreateOpenQuestion(ctx, meetingID, mutation)
 		if err != nil {
 			return nil, "创建待确认问题失败。", err
@@ -433,6 +521,26 @@ func (s *Server) executeInteractionCommandWithEventID(ctx context.Context, meeti
 			OpenQuestion: question,
 		})
 		return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已删除第 %d 条待确认问题：%s", index, deleted.Question))
+
+	case "delete_open_questions":
+		ids, err := s.resolveMergeOpenQuestionIDs(ctx, meetingID, command)
+		if err != nil {
+			return nil, "没有找到要删除的待确认问题。", err
+		}
+		originals, err := s.openQuestionSnapshots(ctx, meetingID, ids)
+		if err != nil {
+			return nil, "读取待确认问题快照失败。", err
+		}
+		for _, id := range ids {
+			if _, err := s.store.DeleteOpenQuestion(ctx, meetingID, id); err != nil {
+				return nil, "删除待确认问题失败。", err
+			}
+		}
+		s.rememberUndoRecord(ctx, meetingID, eventID, interactionUndoPayload{
+			Type:          "restore_open_question_set",
+			OpenQuestions: originals,
+		})
+		return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已删除 %d 条待确认问题。", len(originals)))
 
 	case "merge_open_questions":
 		ids, err := s.resolveMergeOpenQuestionIDs(ctx, meetingID, command)

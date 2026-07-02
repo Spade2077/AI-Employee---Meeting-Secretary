@@ -593,6 +593,9 @@ func saveDynamicSectionExtractionsTx(ctx context.Context, tx *sql.Tx, meetingID 
 		if title == "" || normalizeForCompare(title) == "" {
 			continue
 		}
+		if looksLikeInteractionCommandText(title) || looksLikeInteractionCommandText(section.Description) {
+			continue
+		}
 		key := normalizeDynamicSectionKey(section.SectionKey, title)
 		description := strings.TrimSpace(section.Description)
 		index := matchingDynamicSectionIndex(existing, key, title)
@@ -683,6 +686,9 @@ func saveDynamicSectionItemsTx(ctx context.Context, tx *sql.Tx, meetingID, secti
 			content = title
 		}
 		sourceText := strings.TrimSpace(item.SourceText)
+		if looksLikeInteractionCommandText(title) || looksLikeInteractionCommandText(content) || looksLikeInteractionCommandText(sourceText) {
+			continue
+		}
 		if index := matchingDynamicSectionItemIndex(existing, title, content); index >= 0 {
 			merged := existing[index]
 			updatedTitle := richerText(merged.Title, title)
@@ -730,6 +736,48 @@ func saveDynamicSectionItemsTx(ctx context.Context, tx *sql.Tx, meetingID, secti
 		})
 	}
 	return nil
+}
+
+func mergeExistingDynamicSectionItemsForSectionsTx(ctx context.Context, tx *sql.Tx, sections []MeetingDynamicSection, now string) ([]MeetingDynamicSection, error) {
+	for index := range sections {
+		items, err := mergeExistingDynamicSectionItemsTx(ctx, tx, sections[index].Items, now)
+		if err != nil {
+			return nil, err
+		}
+		sections[index].Items = items
+	}
+	return sections, nil
+}
+
+func mergeExistingDynamicSectionItemsTx(ctx context.Context, tx *sql.Tx, items []MeetingDynamicSectionItem, now string) ([]MeetingDynamicSectionItem, error) {
+	merged := make([]MeetingDynamicSectionItem, 0, len(items))
+	for _, item := range items {
+		if index := matchingDynamicSectionItemIndex(merged, item.Title, item.Content); index >= 0 {
+			target := merged[index]
+			updatedTitle := richerText(target.Title, item.Title)
+			updatedContent := richerText(target.Content, item.Content)
+			updatedSource := mergeSourceText(target.SourceText, item.SourceText)
+			if updatedTitle != target.Title || updatedContent != target.Content || updatedSource != target.SourceText {
+				if _, err := tx.ExecContext(ctx, `UPDATE meeting_dynamic_section_items SET
+					title = ?, content = ?, source_text = ?, updated_at = ?
+					WHERE id = ?`,
+					updatedTitle, updatedContent, updatedSource, now, target.ID); err != nil {
+					return nil, err
+				}
+				target.Title = updatedTitle
+				target.Content = updatedContent
+				target.SourceText = updatedSource
+				target.UpdatedAt = now
+				merged[index] = target
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE meeting_dynamic_section_items SET is_deleted = 1, updated_at = ? WHERE id = ?`, now, item.ID); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		merged = append(merged, item)
+	}
+	return merged, nil
 }
 
 func dynamicSectionsTx(ctx context.Context, tx *sql.Tx, meetingID string) ([]MeetingDynamicSection, error) {

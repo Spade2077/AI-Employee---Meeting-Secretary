@@ -288,34 +288,35 @@ func (s *Server) resolveMergeDynamicSectionIDs(ctx context.Context, meetingID st
 	if err != nil {
 		return nil, err
 	}
-	ids := append([]string{}, command.SourceIDs...)
+	explicitIDs := append([]string{}, command.SourceIDs...)
 	if command.TargetID != "" {
-		ids = append([]string{command.TargetID}, ids...)
+		explicitIDs = append([]string{command.TargetID}, explicitIDs...)
 	}
 	for _, index := range command.SourceIndices {
 		if index <= 0 || index > len(sections) {
 			return nil, fmt.Errorf("dynamic section index %d out of range", index)
 		}
-		ids = append(ids, sections[index-1].ID)
+		explicitIDs = append(explicitIDs, sections[index-1].ID)
 	}
 	if command.TargetID == "" && command.TargetIndex > 0 {
 		if command.TargetIndex > len(sections) {
 			return nil, fmt.Errorf("dynamic section index %d out of range", command.TargetIndex)
 		}
-		ids = append([]string{sections[command.TargetIndex-1].ID}, ids...)
+		explicitIDs = append([]string{sections[command.TargetIndex-1].ID}, explicitIDs...)
 	}
-	for _, candidate := range []string{command.SectionTitle, command.Title, command.Content, command.Reason} {
-		key := normalizeForCompare(candidate)
-		if key == "" {
-			continue
-		}
-		for _, section := range sections {
-			sectionTitle := normalizeForCompare(section.Title)
-			sectionKey := normalizeForCompare(section.SectionKey)
-			if sectionTitle != "" && strings.Contains(key, sectionTitle) ||
-				sectionKey != "" && strings.Contains(key, sectionKey) {
-				ids = append(ids, section.ID)
-			}
+
+	// 已经有明确编号或 ID 时，以显式来源为准，不再用新标题、描述反向猜测目标。
+	explicitIDs = uniqueNonEmptyStrings(explicitIDs)
+	if len(explicitIDs) >= 2 {
+		return explicitIDs, nil
+	}
+	ids := append([]string{}, explicitIDs...)
+	for _, candidate := range []string{command.Instruction, command.Reason} {
+		ids = append(ids, dynamicSectionIDsFromText(candidate, sections)...)
+	}
+	if len(uniqueNonEmptyStrings(ids)) < 2 && len(explicitIDs) == 0 {
+		for _, candidate := range []string{command.SectionTitle, command.Title, command.Content} {
+			ids = append(ids, dynamicSectionIDsFromText(candidate, sections)...)
 		}
 	}
 	ids = uniqueNonEmptyStrings(ids)
@@ -323,6 +324,23 @@ func (s *Server) resolveMergeDynamicSectionIDs(ctx context.Context, meetingID st
 		return nil, fmt.Errorf("merge requires at least two dynamic section targets")
 	}
 	return ids, nil
+}
+
+func dynamicSectionIDsFromText(candidate string, sections []MeetingDynamicSection) []string {
+	ids := []string{}
+	key := normalizeForCompare(candidate)
+	if key == "" {
+		return ids
+	}
+	for _, section := range sections {
+		sectionTitle := normalizeForCompare(section.Title)
+		sectionKey := normalizeForCompare(section.SectionKey)
+		if (sectionTitle != "" && strings.Contains(key, sectionTitle)) ||
+			(sectionKey != "" && strings.Contains(key, sectionKey)) {
+			ids = append(ids, section.ID)
+		}
+	}
+	return ids
 }
 
 func (s *Server) dynamicSectionSnapshots(ctx context.Context, meetingID string, ids []string) ([]MeetingDynamicSection, error) {
@@ -407,20 +425,20 @@ func (s *Server) resolveFrameworkSectionTarget(ctx context.Context, meetingID st
 		command.Reason,
 	}
 	for _, candidate := range candidates {
-		key := normalizeFrameworkSectionKey(snapshot.MeetingType, candidate, candidate)
-		compare := normalizeForCompare(candidate)
-		if key == "" && compare == "" {
+		key := normalizeForCompare(candidate)
+		frameworkKey := normalizeFrameworkSectionKey(snapshot.MeetingType, candidate, candidate)
+		if frameworkKey == "" && key == "" {
 			continue
 		}
 		for index, section := range sections {
 			sectionKey := normalizeFrameworkSectionKey(snapshot.MeetingType, section.SectionKey, section.Title)
 			titleKey := normalizeForCompare(section.Title)
-			if key != "" && sectionKey == key {
+			if frameworkKey != "" && sectionKey == frameworkKey {
 				return index + 1, &sections[index], nil
 			}
-			if compare != "" && (titleKey == compare ||
-				strings.Contains(titleKey, compare) ||
-				strings.Contains(compare, titleKey) ||
+			if key != "" && (titleKey == key ||
+				strings.Contains(titleKey, key) ||
+				strings.Contains(key, titleKey) ||
 				similarStructuredText(section.Title, candidate)) {
 				return index + 1, &sections[index], nil
 			}

@@ -160,6 +160,25 @@ function formatDuration(seconds) {
   return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
 }
 
+function normalizeInteractionMode(update) {
+  const active = Boolean(update?.active || update?.mode === "editing");
+  return {
+    mode: active ? "editing" : "normal",
+    active,
+    expiresAt: String(update?.expiresAt || ""),
+    remainingSeconds: Math.max(0, Number(update?.remainingSeconds) || 0),
+    reason: String(update?.reason || "")
+  };
+}
+
+function interactionModeLabel(modeState) {
+  if (modeState?.active) {
+    const seconds = Math.max(0, Number(modeState.remainingSeconds) || 0);
+    return `修改模式 ${seconds}s`;
+  }
+  return "记录模式";
+}
+
 function meetingTitle(meeting, snapshot) {
   return snapshot.title || meeting?.title || "未命名会议";
 }
@@ -737,6 +756,7 @@ export default function App() {
   const [motionRun, setMotionRun] = useState(0);
   const [interactions, setInteractions] = useState([]);
   const [interactionStatus, setInteractionStatus] = useState(null);
+  const [interactionMode, setInteractionMode] = useState(() => normalizeInteractionMode(null));
   const [intelligenceStatus, setIntelligenceStatus] = useState(null);
   const [activeView, setActiveViewState] = useState(() => {
     const savedView = localStorage.getItem("meetingDisplayView") || "live";
@@ -933,6 +953,34 @@ export default function App() {
   }, [meeting?.startedAt, status]);
 
   useEffect(() => {
+    if (!interactionMode.active || !interactionMode.expiresAt) return undefined;
+
+    const syncRemaining = () => {
+      setInteractionMode((current) => {
+        if (!current.active || !current.expiresAt) return current;
+        const expiresAt = new Date(current.expiresAt).getTime();
+        if (Number.isNaN(expiresAt)) return current;
+        const remainingSeconds = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+        if (remainingSeconds <= 0) {
+          return {
+            ...current,
+            mode: "normal",
+            active: false,
+            remainingSeconds: 0,
+            reason: current.reason || "修改模式已超时"
+          };
+        }
+        if (remainingSeconds === current.remainingSeconds) return current;
+        return { ...current, remainingSeconds };
+      });
+    };
+
+    syncRemaining();
+    const timer = window.setInterval(syncRemaining, 1000);
+    return () => window.clearInterval(timer);
+  }, [interactionMode.active, interactionMode.expiresAt]);
+
+  useEffect(() => {
     let stopped = false;
     let socket;
 
@@ -989,6 +1037,11 @@ export default function App() {
         if (message.type === "interaction_status") {
           if (message.meetingId) acceptMeetingID(message.meetingId);
           setInteractionStatus(message);
+        }
+
+        if (message.type === "interaction_mode_update") {
+          if (message.meetingId) acceptMeetingID(message.meetingId);
+          setInteractionMode(normalizeInteractionMode(message));
         }
 
         if (message.type === "interaction_update" && message.event) {
@@ -1050,6 +1103,7 @@ export default function App() {
         status={status}
         duration={durationSeconds}
         socketState={socketState}
+        interactionMode={interactionMode}
         activeView={activeView}
         typeSaving={meetingTypeSaving}
         onViewChange={setActiveView}
@@ -1106,7 +1160,7 @@ export default function App() {
   );
 }
 
-function Header({ title, type, meetingID, status, duration, socketState, activeView, typeSaving, onViewChange, onTypeChange, onOpenShare }) {
+function Header({ title, type, meetingID, status, duration, socketState, interactionMode, activeView, typeSaving, onViewChange, onTypeChange, onOpenShare }) {
   const previousTitle = useRef(title);
   const [titleRun, setTitleRun] = useState(0);
 
@@ -1141,6 +1195,11 @@ function Header({ title, type, meetingID, status, duration, socketState, activeV
         <StatusPill label={STATUS_LABELS[status] || status} tone={status === "recording" ? "good" : status === "ended" ? "quiet" : "warn"} />
         <StatusPill label={formatDuration(duration)} tone="time" />
         <StatusPill label={socketState === "online" ? "实时连接" : "连接中"} tone={socketState === "online" ? "good" : "warn"} />
+        <StatusPill
+          label={interactionModeLabel(interactionMode)}
+          tone={interactionMode?.active ? "editing" : "quiet"}
+          title={interactionMode?.active ? "修改模式下语音不会进入全文转写" : "普通会议内容会进入全文转写"}
+        />
       </div>
 
       <nav className="view-tabs" aria-label="展示视图">
@@ -1163,8 +1222,8 @@ function Header({ title, type, meetingID, status, duration, socketState, activeV
   );
 }
 
-function StatusPill({ label, tone }) {
-  return <span className={`status-pill ${tone}`}>{label}</span>;
+function StatusPill({ label, tone, title }) {
+  return <span className={`status-pill ${tone || ""}`} title={title || label}>{label}</span>;
 }
 
 function LiveView({ transcriptText, summary, counts, utteranceCount, intelligenceStatus }) {

@@ -191,7 +191,50 @@ func structuredTextShouldMerge(left, right string) bool {
 	if similarStructuredText(left, right) {
 		return true
 	}
+	if structuredTextLooksExpanded(left, right) {
+		return true
+	}
 	return isStructuredPlaceholderText(left) && !isStructuredPlaceholderText(right) && normalizeForCompare(right) != ""
+}
+
+func structuredTextLooksExpanded(left, right string) bool {
+	leftKey := normalizeForCompare(left)
+	rightKey := normalizeForCompare(right)
+	if leftKey == "" || rightKey == "" || leftKey == rightKey {
+		return false
+	}
+	leftRunes := []rune(leftKey)
+	rightRunes := []rune(rightKey)
+	minLen := minInt(len(leftRunes), len(rightRunes))
+	if minLen < 4 {
+		return false
+	}
+	shorter := leftKey
+	longer := rightKey
+	if len(leftRunes) > len(rightRunes) {
+		shorter = rightKey
+		longer = leftKey
+	}
+	if strings.HasPrefix(longer, shorter) {
+		return true
+	}
+	return minLen >= 6 && strings.Contains(longer, shorter)
+}
+
+func looksLikeInteractionCommandText(value string) bool {
+	key := normalizeForCompare(value)
+	if key == "" {
+		return false
+	}
+	if containsNormalizedPhrase(key, "小艾小艾", "小爱小爱", "小ai小ai") {
+		return true
+	}
+	hasTarget := containsNormalizedPhrase(key,
+		"待确认问题", "待确认", "待办", "任务", "风险", "决策", "动态模块", "模块", "摘要", "总结", "会议标题")
+	hasAction := containsNormalizedPhrase(key,
+		"新增", "添加", "补充", "创建", "删除", "删掉", "去掉", "移除", "修改", "改成", "改为",
+		"调整为", "更新为", "设置为", "设为", "合并", "关闭", "完成", "解决", "展示", "显示", "隐藏", "切换")
+	return hasTarget && hasAction
 }
 
 func isStructuredPlaceholderText(value string) bool {

@@ -33,6 +33,7 @@ var wakeWordPatterns = []struct {
 const (
 	interactionDebounce = 900 * time.Millisecond
 	interactionWakeTTL  = 8 * time.Second
+	interactionEchoTTL  = 18 * time.Second
 )
 
 type PendingInteraction struct {
@@ -44,6 +45,11 @@ type PendingInteraction struct {
 	LastResultAt   time.Time
 	UpdatedAt      time.Time
 	Timer          *time.Timer
+}
+
+type recentInteractionTranscript struct {
+	Text   string
+	SeenAt time.Time
 }
 
 type interactionTimingSeed struct {
@@ -116,20 +122,56 @@ func extractWakeInstruction(text string) (wakeWord, instruction string, ok bool)
 }
 
 func (s *Server) consumeInteractionTranscript(result stt.TranscriptResult) bool {
-	if !result.IsFinal || result.MeetingID == "" || strings.TrimSpace(result.Text) == "" {
+	text := strings.TrimSpace(result.Text)
+	if !result.IsFinal || result.MeetingID == "" || text == "" {
 		return false
 	}
 	receivedAt := time.Now()
-	if wakeWord, instruction, ok := extractWakeInstruction(result.Text); ok {
-		s.rememberInteraction(result.MeetingID, wakeWord, result.Text, instruction, receivedAt)
+	if wakeWord, instruction, ok := extractWakeInstruction(text); ok {
+		if isEnterInteractionModeCommand(instruction) {
+			s.enableInteractionEditMode(result.MeetingID, "已进入修改模式，30 秒内后续语音将作为修改指令。", receivedAt)
+			return true
+		}
+		if isExitInteractionModeCommand(instruction) {
+			s.disableInteractionEditMode(result.MeetingID, "已退出修改模式，后续语音将继续进入全文转写。")
+			return true
+		}
+		s.rememberInteraction(result.MeetingID, wakeWord, text, instruction, receivedAt)
 		return true
 	}
+
+	if s.interactionEditModeActive(result.MeetingID, receivedAt) {
+		if isExitInteractionModeCommand(text) {
+			s.disableInteractionEditMode(result.MeetingID, "已退出修改模式，后续语音将继续进入全文转写。")
+			return true
+		}
+		if isEnterInteractionModeCommand(text) {
+			s.refreshInteractionEditMode(result.MeetingID, "修改模式倒计时已刷新。", receivedAt)
+			return true
+		}
+		if s.hasPendingInteraction(result.MeetingID) {
+			s.appendPendingInteractionInstruction(result.MeetingID, text, receivedAt)
+			s.refreshInteractionEditMode(result.MeetingID, "修改模式倒计时已刷新。", receivedAt)
+			return true
+		}
+		if s.isRecentInteractionEcho(result.MeetingID, text, receivedAt) {
+			s.refreshInteractionEditMode(result.MeetingID, "修改模式倒计时已刷新。", receivedAt)
+			return true
+		}
+		s.refreshInteractionEditMode(result.MeetingID, "修改模式倒计时已刷新。", receivedAt)
+		s.rememberInteraction(result.MeetingID, "修改模式", "", text, receivedAt)
+		return true
+	}
+
 	if s.hasPendingInteraction(result.MeetingID) {
-		s.appendPendingInteractionInstruction(result.MeetingID, result.Text, receivedAt)
+		s.appendPendingInteractionInstruction(result.MeetingID, text, receivedAt)
 		return true
 	}
-	if isWakePrefix(result.Text) {
-		s.rememberInteraction(result.MeetingID, "", result.Text, "", receivedAt)
+	if s.isRecentInteractionEcho(result.MeetingID, text, receivedAt) {
+		return true
+	}
+	if isWakePrefix(text) {
+		s.rememberInteraction(result.MeetingID, "", text, "", receivedAt)
 		return true
 	}
 	return false
@@ -164,6 +206,7 @@ func (s *Server) rememberInteraction(meetingID, wakeWord, wakeTranscript, instru
 	pending.WakeTranscript = strings.TrimSpace(wakeTranscript)
 	pending.Instruction = strings.TrimSpace(instruction)
 	pending.UpdatedAt = time.Now()
+	s.rememberRecentInteractionTranscriptLocked(meetingID, receivedAt, pending.WakeTranscript, pending.Instruction)
 	s.schedulePendingInteractionLocked(meetingID, pending)
 }
 
@@ -189,6 +232,7 @@ func (s *Server) appendPendingInteractionInstruction(meetingID, instruction stri
 	pending.Instruction = richerText(pending.Instruction, instruction)
 	pending.LastResultAt = receivedAt
 	pending.UpdatedAt = time.Now()
+	s.rememberRecentInteractionTranscriptLocked(meetingID, receivedAt, pending.Instruction, instruction)
 	s.schedulePendingInteractionLocked(meetingID, pending)
 }
 
@@ -252,6 +296,12 @@ func (s *Server) ensureInteractionMapsLocked() {
 	if s.pendingInteractions == nil {
 		s.pendingInteractions = map[string]*PendingInteraction{}
 	}
+	if s.recentInteractions == nil {
+		s.recentInteractions = map[string][]recentInteractionTranscript{}
+	}
+	if s.interactionModes == nil {
+		s.interactionModes = map[string]*InteractionModeState{}
+	}
 }
 
 func (s *Server) cancelPendingInteractionLocked(meetingID string) {
@@ -260,6 +310,80 @@ func (s *Server) cancelPendingInteractionLocked(meetingID string) {
 		pending.Timer.Stop()
 	}
 	delete(s.pendingInteractions, meetingID)
+}
+
+func (s *Server) rememberRecentInteractionTranscriptLocked(meetingID string, seenAt time.Time, values ...string) {
+	s.ensureInteractionMapsLocked()
+	if seenAt.IsZero() {
+		seenAt = time.Now()
+	}
+	cutoff := seenAt.Add(-interactionEchoTTL)
+	current := s.recentInteractions[meetingID]
+	next := make([]recentInteractionTranscript, 0, len(current)+len(values))
+	for _, item := range current {
+		if item.SeenAt.After(cutoff) && normalizeForCompare(item.Text) != "" {
+			next = append(next, item)
+		}
+	}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if normalizeForCompare(value) == "" {
+			continue
+		}
+		next = append(next, recentInteractionTranscript{Text: value, SeenAt: seenAt})
+	}
+	if len(next) > 12 {
+		next = next[len(next)-12:]
+	}
+	s.recentInteractions[meetingID] = next
+}
+
+func (s *Server) isRecentInteractionEcho(meetingID, text string, seenAt time.Time) bool {
+	key := normalizeForCompare(text)
+	if key == "" {
+		return false
+	}
+	s.interactionMu.Lock()
+	defer s.interactionMu.Unlock()
+	s.ensureInteractionMapsLocked()
+
+	if seenAt.IsZero() {
+		seenAt = time.Now()
+	}
+	cutoff := seenAt.Add(-interactionEchoTTL)
+	items := s.recentInteractions[meetingID]
+	filtered := make([]recentInteractionTranscript, 0, len(items))
+	matched := false
+	for _, item := range items {
+		if item.SeenAt.Before(cutoff) {
+			continue
+		}
+		filtered = append(filtered, item)
+		if matched {
+			continue
+		}
+		if interactionTextsLikelySame(item.Text, text) {
+			matched = true
+		}
+	}
+	s.recentInteractions[meetingID] = filtered
+	return matched
+}
+
+func interactionTextsLikelySame(previous, incoming string) bool {
+	left := normalizeForCompare(previous)
+	right := normalizeForCompare(incoming)
+	if left == "" || right == "" {
+		return false
+	}
+	minLen := minInt(len([]rune(left)), len([]rune(right)))
+	if minLen < 8 {
+		return false
+	}
+	if strings.Contains(left, right) || strings.Contains(right, left) {
+		return true
+	}
+	return structuredTextSimilarity(left, right) >= 0.72 && looksLikeInteractionCommandText(incoming)
 }
 
 func isWakePrefix(text string) bool {

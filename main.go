@@ -58,6 +58,8 @@ func main() {
 		intelLastLen:        map[string]int{},
 		intelTimers:         map[string]*time.Timer{},
 		pendingInteractions: map[string]*PendingInteraction{},
+		recentInteractions:  map[string][]recentInteractionTranscript{},
+		interactionModes:    map[string]*InteractionModeState{},
 		sttSeenAt:           map[string]time.Time{},
 		sttResultAt:         map[string]time.Time{},
 		sttRestartAt:        map[string]time.Time{},

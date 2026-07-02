@@ -119,6 +119,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	meeting, err := s.store.CurrentMeeting(r.Context())
 	if err == nil {
 		_ = conn.WriteJSON(s.stateUpdate(meeting, nil))
+		_ = conn.WriteJSON(s.currentInteractionModeUpdate(meeting.ID))
 	}
 
 	for {

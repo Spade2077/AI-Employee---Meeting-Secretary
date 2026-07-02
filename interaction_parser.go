@@ -221,7 +221,7 @@ func normalizeInteractionCommand(command InteractionCommand) InteractionCommand 
 		if command.TargetType == "" {
 			command.TargetType = "risk"
 		}
-	case "create_open_question", "update_open_question", "close_open_question", "delete_open_question", "merge_open_questions":
+	case "create_open_question", "update_open_question", "close_open_question", "delete_open_question", "delete_open_questions", "merge_open_questions":
 		if command.TargetType == "" {
 			command.TargetType = "open_question"
 		}
@@ -796,8 +796,10 @@ func parseDynamicSectionDeleteMergeLocally(instruction string, snapshot *Intelli
 	}
 
 	if containsNormalizedPhrase(key, "合并", "归并", "并到一起", "整合") {
-		ids := dynamicSectionIDsMentionedInInstruction(key, snapshot.DynamicSections)
-		indices := parseAllDynamicSectionOrdinals(text)
+		sourceText := dynamicSectionMergeSourceText(text)
+		sourceKey := normalizeForCompare(sourceText)
+		ids := dynamicSectionIDsMentionedInInstruction(sourceKey, snapshot.DynamicSections)
+		indices := parseAllDynamicSectionOrdinals(sourceText)
 		for _, index := range indices {
 			if index > 0 && index <= len(snapshot.DynamicSections) {
 				ids = append(ids, snapshot.DynamicSections[index-1].ID)
@@ -816,11 +818,14 @@ func parseDynamicSectionDeleteMergeLocally(instruction string, snapshot *Intelli
 				}
 			}
 		}
+		title := extractDynamicSectionMergeTitle(text)
 		return InteractionCommand{
 			Intent:        "merge_dynamic_sections",
 			TargetType:    "dynamic_section",
 			SourceIDs:     ids,
 			SourceIndices: sourceIndices,
+			SectionTitle:  title,
+			Title:         title,
 			Confidence:    0.86,
 			NeedConfirm:   false,
 			Reply:         fmt.Sprintf("已识别为合并 %d 个动态模块。", len(ids)),
@@ -847,6 +852,79 @@ func parseDynamicSectionDeleteMergeLocally(instruction string, snapshot *Intelli
 	return InteractionCommand{}, false
 }
 
+func dynamicSectionMergeSourceText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	mergeIndex, mergeMarker := firstTextMarker(text, []string{"合并", "归并", "并到一起", "整合"})
+	if mergeIndex < 0 {
+		return text
+	}
+
+	// 合并命令里，“合并”前面通常是来源模块，“合并/改名为”后面通常是结果描述。
+	// 只用来源片段匹配目标，避免新标题误命中其它已有模块。
+	before := strings.TrimSpace(text[:mergeIndex])
+	if dynamicSectionMergeSourceLooksExplicit(before) {
+		return before
+	}
+
+	after := strings.TrimSpace(text[mergeIndex+len(mergeMarker):])
+	after = textBeforeAnyMarker(after, []string{
+		"改名为", "重命名为", "命名为",
+		"名字改成", "名字改为", "名称改成", "名称改为", "标题改成", "标题改为",
+		"合并为", "合并成", "整合为", "归并为", "叫做", "叫",
+	})
+	if strings.TrimSpace(after) != "" {
+		return after
+	}
+	return before
+}
+
+func dynamicSectionMergeSourceLooksExplicit(text string) bool {
+	if len(parseAllDynamicSectionOrdinals(text)) > 0 {
+		return true
+	}
+	key := normalizeForCompare(text)
+	return containsNormalizedPhrase(key, "动态模块", "自定义模块", "发现模块", "模块", "栏目", "板块", "专题")
+}
+
+func extractDynamicSectionMergeTitle(text string) string {
+	title := extractDynamicSectionTitleAfterMarkers(text, []string{
+		"改名为", "重命名为", "命名为",
+		"名字改成", "名字改为", "名称改成", "名称改为", "标题改成", "标题改为",
+		"叫做", "叫",
+		"合并为", "合并成", "整合为", "归并为",
+	})
+	switch normalizeForCompare(title) {
+	case normalizeForCompare("一条"), normalizeForCompare("一项"), normalizeForCompare("一个"), normalizeForCompare("一个模块"), normalizeForCompare("一个动态模块"):
+		return ""
+	default:
+		return title
+	}
+}
+
+func isDynamicSectionRenameInstruction(key string) bool {
+	return containsNormalizedPhrase(key, "改名", "重命名", "命名为", "名称", "名字", "标题", "叫做")
+}
+
+func extractDynamicSectionRenameTitle(text string) string {
+	return extractDynamicSectionTitleAfterMarkers(text, []string{
+		"改名为", "重命名为", "命名为",
+		"名字改成", "名字改为", "名称改成", "名称改为", "标题改成", "标题改为",
+		"叫做",
+	})
+}
+
+func extractDynamicSectionTitleAfterMarkers(text string, markers []string) string {
+	value := textAfterAnyMarker(text, markers)
+	if value == "" {
+		return ""
+	}
+	value = textBeforeAnyMarker(value, []string{"，", "。", "；", ";", ",", ".", "！", "?", "？"})
+	return cleanupDynamicSectionTitle(value)
+}
+
 func parseDynamicSectionMutationLocally(instruction string, snapshot *IntelligenceSnapshot) (InteractionCommand, bool) {
 	text := strings.TrimSpace(instruction)
 	if text == "" {
@@ -863,10 +941,28 @@ func parseDynamicSectionMutationLocally(instruction string, snapshot *Intelligen
 		sections = snapshot.DynamicSections
 	}
 
-	if containsNormalizedPhrase(key, "修改", "更新", "调整", "改一下", "改成", "改为", "重写") {
+	if containsNormalizedPhrase(key, "修改", "更新", "调整", "改一下", "改成", "改为", "重写", "改名", "重命名", "命名为") {
 		targetIndex, targetSection := matchDynamicSectionFromInstruction(key, text, sections)
 		if targetSection == nil {
 			return InteractionCommand{}, false
+		}
+		if parseDynamicSectionItemOrdinal(text) == 0 && isDynamicSectionRenameInstruction(key) {
+			title := extractDynamicSectionRenameTitle(text)
+			if title == "" {
+				return InteractionCommand{}, false
+			}
+			return InteractionCommand{
+				Intent:       "update_dynamic_section",
+				TargetType:   "dynamic_section",
+				TargetIndex:  targetIndex,
+				TargetID:     targetSection.ID,
+				SectionKey:   targetSection.SectionKey,
+				SectionTitle: targetSection.Title,
+				Title:        title,
+				Confidence:   0.86,
+				NeedConfirm:  false,
+				Reply:        fmt.Sprintf("识别为将动态模块「%s」改名为「%s」。", targetSection.Title, title),
+			}, true
 		}
 		content := extractDynamicSectionUpdateContent(text)
 		if content == "" {
@@ -957,12 +1053,28 @@ func extractDynamicSectionTitle(text string) string {
 	for _, pattern := range patterns {
 		matches := pattern.FindStringSubmatch(text)
 		if len(matches) >= 2 {
-			if title := cleanupDynamicSectionValue(matches[1]); title != "" {
+			if title := cleanupDynamicSectionTitle(matches[1]); title != "" {
 				return title
 			}
 		}
 	}
 	return ""
+}
+
+func cleanupDynamicSectionTitle(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "，。！？、；;,.!?：: ")
+	for _, prefix := range []string{"在里面", "里面"} {
+		value = strings.TrimPrefix(value, prefix)
+		value = strings.TrimSpace(value)
+		value = strings.Trim(value, "，。！？、；;,.!?：: ")
+	}
+	for _, suffix := range []string{"动态模块", "自定义模块", "发现模块", "模块", "栏目", "板块", "专题", "谢谢", "就这样", "先这样"} {
+		value = strings.TrimSuffix(value, suffix)
+		value = strings.TrimSpace(value)
+		value = strings.Trim(value, "，。！？、；;,.!?：: ")
+	}
+	return value
 }
 
 func extractDynamicSectionCreateContent(text string) string {
@@ -1038,10 +1150,35 @@ func textAfterAnyMarker(text string, markers []string) string {
 	return ""
 }
 
+func textBeforeAnyMarker(text string, markers []string) string {
+	cut := -1
+	for _, marker := range markers {
+		if index := strings.Index(text, marker); index >= 0 && (cut < 0 || index < cut) {
+			cut = index
+		}
+	}
+	if cut >= 0 {
+		return text[:cut]
+	}
+	return text
+}
+
+func firstTextMarker(text string, markers []string) (int, string) {
+	bestIndex := -1
+	bestMarker := ""
+	for _, marker := range markers {
+		if index := strings.Index(text, marker); index >= 0 && (bestIndex < 0 || index < bestIndex) {
+			bestIndex = index
+			bestMarker = marker
+		}
+	}
+	return bestIndex, bestMarker
+}
+
 func cleanupDynamicSectionValue(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.Trim(value, "，。！？、；;,.!?：: ")
-	for _, prefix := range []string{"为", "是", "成", "到", "在里面", "里面"} {
+	for _, prefix := range []string{"在里面", "里面"} {
 		value = strings.TrimPrefix(value, prefix)
 		value = strings.TrimSpace(value)
 		value = strings.Trim(value, "，。！？、；;,.!?：: ")
@@ -1177,6 +1314,31 @@ func parseOpenQuestionMutationLocally(instruction string, snapshot *Intelligence
 		}
 	}
 
+	if containsNormalizedPhrase(key, "删除", "删掉", "去掉", "移除") && len(questions) > 0 {
+		deleteIndices := parseTargetOrdinals(text)
+		if len(deleteIndices) >= 2 {
+			ids := []string{}
+			validIndices := []int{}
+			for _, index := range deleteIndices {
+				if index > 0 && index <= len(questions) {
+					ids = append(ids, questions[index-1].ID)
+					validIndices = append(validIndices, index)
+				}
+			}
+			if len(uniqueNonEmptyStrings(ids)) >= 2 {
+				return InteractionCommand{
+					Intent:        "delete_open_questions",
+					TargetType:    "open_question",
+					SourceIndices: validIndices,
+					SourceIDs:     ids,
+					Confidence:    0.86,
+					NeedConfirm:   false,
+					Reply:         fmt.Sprintf("已识别为删除 %d 条待确认问题。", len(ids)),
+				}, true
+			}
+		}
+	}
+
 	index := parseOrdinalIndex(text)
 	if index <= 0 || index > len(questions) {
 		return InteractionCommand{}, false
@@ -1240,9 +1402,29 @@ func extractOpenQuestionUpdateValue(text string) string {
 		"截止时间改成", "截止时间改为", "截止时间是", "截止时间为",
 		"确认时间改成", "确认时间改为", "确认时间是", "确认时间为",
 		"状态改成", "状态改为",
-		"改成", "改为", "调整为", "更新为", "设置为", "设为", "是", "为",
+		"改成", "改为", "调整为", "更新为", "设置为", "设为",
 	}
 	return cleanupDynamicSectionValue(textAfterAnyMarker(text, markers))
+}
+
+func parseTargetOrdinals(text string) []int {
+	pattern := regexp.MustCompile(`(?:第\s*)?([0-9]+|[一二两三四五六七八九十]{1,3})\s*(?:条|项|个)?`)
+	matches := pattern.FindAllStringSubmatch(text, -1)
+	values := make([]int, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		raw := match[1]
+		if number, err := strconv.Atoi(raw); err == nil {
+			values = append(values, number)
+			continue
+		}
+		if number := chineseNumber(raw); number > 0 {
+			values = append(values, number)
+		}
+	}
+	return positiveUniqueInts(values)
 }
 
 func parseRiskMutationLocally(instruction string, snapshot *IntelligenceSnapshot) (InteractionCommand, bool) {

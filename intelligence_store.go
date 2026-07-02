@@ -143,6 +143,10 @@ func (s *Store) SaveIntelligenceExtraction(ctx context.Context, meetingID string
 	if err != nil {
 		return nil, err
 	}
+	existingDynamicSections, err = mergeExistingDynamicSectionItemsForSectionsTx(ctx, tx, existingDynamicSections, now)
+	if err != nil {
+		return nil, err
+	}
 	if err := saveDynamicSectionExtractionsTx(ctx, tx, meetingID, existingDynamicSections, result.DynamicSections, now); err != nil {
 		return nil, err
 	}
@@ -190,6 +194,13 @@ func (s *Store) CleanupIntelligenceDuplicates(ctx context.Context, meetingID str
 		return err
 	}
 	if _, err := mergeExistingOpenQuestionsTx(ctx, tx, openQuestions, now); err != nil {
+		return err
+	}
+	dynamicSections, err := dynamicSectionsTx(ctx, tx, meetingID)
+	if err != nil {
+		return err
+	}
+	if _, err := mergeExistingDynamicSectionItemsForSectionsTx(ctx, tx, dynamicSections, now); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -258,6 +269,9 @@ func saveDecisionExtractionsTx(ctx context.Context, tx *sql.Tx, meetingID string
 		if content == "" || normalizeForCompare(content) == "" {
 			continue
 		}
+		if looksLikeInteractionCommandText(content) || looksLikeInteractionCommandText(decision.SourceText) {
+			continue
+		}
 		if index := matchingDecisionIndex(existingDecisions, content); index >= 0 {
 			merged := existingDecisions[index]
 			updatedContent := richerText(merged.Content, content)
@@ -311,6 +325,9 @@ func saveActionItemExtractionsTx(ctx context.Context, tx *sql.Tx, meetingID stri
 			status = "open"
 		}
 		sourceText := strings.TrimSpace(item.SourceText)
+		if looksLikeInteractionCommandText(task) || looksLikeInteractionCommandText(sourceText) {
+			continue
+		}
 		if index := matchingActionItemIndexWithSource(existingActionItems, task, owner, dueDate, sourceText); index >= 0 {
 			merged := existingActionItems[index]
 			updatedTask := richerText(merged.Task, task)
@@ -393,6 +410,9 @@ func saveRiskExtractionsTx(ctx context.Context, tx *sql.Tx, meetingID string, ex
 		dueDate := strings.TrimSpace(risk.DueDate)
 		status := normalizeStructuredStatus(risk.Status)
 		sourceText := strings.TrimSpace(risk.SourceText)
+		if looksLikeInteractionCommandText(content) || looksLikeInteractionCommandText(sourceText) {
+			continue
+		}
 		if index := matchingRiskIndex(existingRisks, content); index >= 0 {
 			merged := existingRisks[index]
 			updatedContent := richerText(merged.Content, content)
@@ -490,6 +510,9 @@ func saveOpenQuestionExtractionsTx(ctx context.Context, tx *sql.Tx, meetingID st
 		dueDate := strings.TrimSpace(question.DueDate)
 		status := normalizeStructuredStatus(question.Status)
 		sourceText := strings.TrimSpace(question.SourceText)
+		if looksLikeInteractionCommandText(text) || looksLikeInteractionCommandText(sourceText) {
+			continue
+		}
 		if index := matchingOpenQuestionIndex(existingQuestions, text); index >= 0 {
 			merged := existingQuestions[index]
 			updatedQuestion := richerText(merged.Question, text)
