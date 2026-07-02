@@ -31,9 +31,10 @@ var wakeWordPatterns = []struct {
 }
 
 const (
-	interactionDebounce = 900 * time.Millisecond
-	interactionWakeTTL  = 8 * time.Second
-	interactionEchoTTL  = 18 * time.Second
+	interactionDebounce           = 1500 * time.Millisecond
+	interactionIncompleteDebounce = 2200 * time.Millisecond
+	interactionWakeTTL            = 8 * time.Second
+	interactionEchoTTL            = 18 * time.Second
 )
 
 type PendingInteraction struct {
@@ -256,6 +257,9 @@ func (s *Server) schedulePendingInteractionLocked(meetingID string, pending *Pen
 	delay := interactionWakeTTL
 	if strings.TrimSpace(pending.Instruction) != "" && strings.TrimSpace(pending.WakeWord) != "" {
 		delay = interactionDebounce
+		if looksLikeIncompleteInteractionInstruction(pending.Instruction) {
+			delay = interactionIncompleteDebounce
+		}
 	}
 	pending.Timer = time.AfterFunc(delay, func() {
 		s.firePendingInteraction(meetingID)
@@ -276,6 +280,9 @@ func (s *Server) firePendingInteraction(meetingID string) {
 	wakeWord := strings.TrimSpace(pending.WakeWord)
 	instruction := strings.TrimSpace(pending.Instruction)
 	if wakeWord == "" || instruction == "" {
+		return
+	}
+	if looksClearlyIncompleteInteractionInstruction(instruction) {
 		return
 	}
 	rawTranscript := strings.TrimSpace(strings.TrimSpace(pending.WakeTranscript) + " " + instruction)
@@ -384,6 +391,83 @@ func interactionTextsLikelySame(previous, incoming string) bool {
 		return true
 	}
 	return structuredTextSimilarity(left, right) >= 0.72 && looksLikeInteractionCommandText(incoming)
+}
+
+func looksLikeIncompleteInteractionInstruction(instruction string) bool {
+	text := strings.TrimSpace(instruction)
+	if text == "" || !looksLikeInteractionCommandText(text) {
+		return false
+	}
+	if looksClearlyIncompleteInteractionInstruction(text) {
+		return true
+	}
+
+	key := normalizeForCompare(text)
+	if !containsNormalizedPhrase(key, "新增", "添加", "补充", "创建", "记录", "修改", "改成", "改为", "调整为", "更新为", "设置为", "设为") {
+		return false
+	}
+	payload := interactionInstructionPayload(text)
+	if payload == "" {
+		return true
+	}
+	payloadLen := len([]rune(normalizeForCompare(payload)))
+	if containsNormalizedPhrase(key, "动态模块", "自定义模块", "发现模块", "模块", "栏目", "板块", "专题") {
+		return payloadLen > 0 && payloadLen < 4
+	}
+	return payloadLen > 0 && payloadLen < 6
+}
+
+func looksClearlyIncompleteInteractionInstruction(instruction string) bool {
+	text := strings.TrimSpace(instruction)
+	key := normalizeForCompare(text)
+	if key == "" {
+		return true
+	}
+	if containsNormalizedPhrase(key, "删除", "删掉", "去掉", "移除", "关闭", "完成", "解决", "撤销", "撤回", "展示", "显示", "隐藏", "切换") {
+		return false
+	}
+	for _, suffix := range []string{
+		"改成", "改为", "调整为", "更新为", "设置为", "设为", "替换为", "变成",
+		"合并为", "合并成", "改名为", "重命名为", "命名为",
+		"新增一个", "新增一条", "添加一个", "添加一条", "补充一个", "补充一条", "创建一个", "创建一条",
+	} {
+		if strings.HasSuffix(key, normalizeForCompare(suffix)) {
+			return true
+		}
+	}
+	if containsNormalizedPhrase(key, "改成", "改为", "调整为", "更新为", "设置为", "设为", "替换为", "变成", "合并为", "合并成") {
+		return interactionInstructionPayload(text) == ""
+	}
+	if containsNormalizedPhrase(key, "新增", "添加", "补充", "创建", "记录") &&
+		containsNormalizedPhrase(key, "待办", "任务", "风险", "决策", "待确认问题", "动态模块", "模块") {
+		return interactionInstructionPayload(text) == ""
+	}
+	return false
+}
+
+func interactionInstructionPayload(text string) string {
+	markers := []string{
+		"改成", "改为", "调整为", "更新为", "设置为", "设为", "替换为", "变成",
+		"合并为", "合并成", "整合为", "归并为",
+		"改名为", "重命名为", "命名为", "名字改成", "名字改为", "标题改成", "标题改为",
+		"新增一个待确认问题", "新增一条待确认问题", "新增一个确认问题", "新增一条确认问题",
+		"新增一个待办", "新增一条待办", "新增一个任务", "新增一条任务",
+		"新增一个风险", "新增一条风险", "新增一个决策", "新增一条决策",
+		"新增一个动态模块", "新增一条动态模块", "新增一个模块", "新增一条模块",
+		"添加一个待确认问题", "添加一条待确认问题", "添加一个待办", "添加一条待办",
+		"添加一个风险", "添加一条风险", "添加一个决策", "添加一条决策",
+		"补充一个待确认问题", "补充一条待确认问题", "补充一个待办", "补充一条待办",
+		"补充一个风险", "补充一条风险", "补充一个决策", "补充一条决策",
+		"创建一个待确认问题", "创建一条待确认问题", "创建一个待办", "创建一条待办",
+		"创建一个风险", "创建一条风险", "创建一个决策", "创建一条决策",
+		"记录一个待确认问题", "记录一条待确认问题", "记录一个待办", "记录一条待办",
+		"记录一个风险", "记录一条风险", "记录一个决策", "记录一条决策",
+		"新增一个", "新增一条", "新增", "添加一个", "添加一条", "添加",
+		"补充一个", "补充一条", "补充", "创建一个", "创建一条", "创建",
+		"记录一个", "记录一条", "记录",
+		"内容是", "内容为", "是", "为",
+	}
+	return cleanupDynamicSectionValue(textAfterAnyMarker(text, markers))
 }
 
 func isWakePrefix(text string) bool {

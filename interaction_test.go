@@ -132,7 +132,7 @@ func TestMeetingInteractionConsumesSplitWakeAndInstruction(t *testing.T) {
 		t.Fatal("expected final instruction to be consumed")
 	}
 
-	waitFor(t, time.Second, func() bool {
+	waitFor(t, 5*time.Second, func() bool {
 		events, err := store.ListInteractionEvents(ctx, meetingID)
 		return err == nil && len(events) == 1
 	})
@@ -967,6 +967,74 @@ func TestUndoUpdateDecisionInteraction(t *testing.T) {
 	}
 }
 
+func TestLocalDecisionParserUpdatesFirstDecision(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	first, err := store.CreateDecision(ctx, meetingID, "第一版演示先使用云端 ASR。", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateDecision(ctx, meetingID, "现场网络异常时使用预录文本兜底。", "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	command, _, err := server.parseInteractionCommand(ctx, meetingID, "把第一条决策改成第一版演示重点展示会中语音交互能力", newInteractionTiming(interactionTimingSeed{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Intent != "update_decision" || command.TargetIndex != 1 || command.TargetID != first.ID {
+		t.Fatalf("expected first decision update command, got %#v", command)
+	}
+
+	snapshot, _, err := server.executeInteractionCommand(ctx, meetingID, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Decisions) != 2 || snapshot.Decisions[0].Content != "第一版演示重点展示会中语音交互能力" {
+		t.Fatalf("expected first decision to be updated, got %#v", snapshot.Decisions)
+	}
+}
+
+func TestInteractionCommandWaitsForStableTranscript(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{
+		store:               store,
+		hub:                 NewHub(),
+		pendingInteractions: map[string]*PendingInteraction{},
+		recentInteractions:  map[string][]recentInteractionTranscript{},
+	}
+
+	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "小艾小艾，新增一个待确认问题，客户现场", IsFinal: true, Provider: "test"}) {
+		t.Fatal("expected partial command to be consumed")
+	}
+	time.Sleep(1200 * time.Millisecond)
+	events, err := store.ListInteractionEvents(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected partial command to wait for more transcript, got %#v", events)
+	}
+
+	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "新增一个待确认问题，客户现场是否允许接入外网", IsFinal: true, Provider: "test"}) {
+		t.Fatal("expected completed command to be consumed")
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		events, err := store.ListInteractionEvents(ctx, meetingID)
+		return err == nil && len(events) == 1
+	})
+	snapshot, err := store.GetIntelligenceSnapshot(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsOpenQuestion(snapshot.OpenQuestions, "客户现场是否允许接入外网") {
+		t.Fatalf("expected completed open question, got %#v", snapshot.OpenQuestions)
+	}
+}
+
 func TestUndoActionItemMergeAndMoveToDecision(t *testing.T) {
 	ctx := context.Background()
 	store, meetingID := newInteractionStore(t, ctx)
@@ -1645,7 +1713,7 @@ func TestRecentInteractionEchoIsConsumedAfterCommandFires(t *testing.T) {
 	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "小艾小艾，新增一个成本控制模块", IsFinal: true, Provider: "test"}) {
 		t.Fatal("expected wake command to be consumed")
 	}
-	waitFor(t, time.Second, func() bool {
+	waitFor(t, 5*time.Second, func() bool {
 		events, err := store.ListInteractionEvents(ctx, meetingID)
 		return err == nil && len(events) == 1
 	})

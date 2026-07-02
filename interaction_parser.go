@@ -52,6 +52,13 @@ func (s *Server) parseInteractionCommand(ctx context.Context, meetingID, instruc
 		return command, string(bytes), nil
 	}
 
+	if command, ok := parseDecisionMutationLocally(instruction, snapshot); ok {
+		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地决策修改指令")
+		command = normalizeInteractionCommand(command)
+		bytes, _ := json.Marshal(command)
+		return command, string(bytes), nil
+	}
+
 	if command, ok := parseMeetingViewLocally(instruction); ok {
 		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地页面切换指令")
 		command = normalizeInteractionCommand(command)
@@ -1391,6 +1398,174 @@ func parseOpenQuestionMutationLocally(instruction string, snapshot *Intelligence
 		command.Content = value
 	}
 	return command, true
+}
+
+func parseDecisionMutationLocally(instruction string, snapshot *IntelligenceSnapshot) (InteractionCommand, bool) {
+	text := strings.TrimSpace(instruction)
+	if text == "" {
+		return InteractionCommand{}, false
+	}
+	key := normalizeForCompare(text)
+	if !containsNormalizedPhrase(key, "决策", "决定", "确认事项") {
+		return InteractionCommand{}, false
+	}
+	if isActionItemToDecisionInstruction(text) {
+		return InteractionCommand{}, false
+	}
+
+	decisions := []MeetingDecision{}
+	if snapshot != nil {
+		decisions = snapshot.Decisions
+	}
+
+	if containsNormalizedPhrase(key, "新增", "添加", "补充", "创建", "记录") &&
+		!containsNormalizedPhrase(key, "改成", "改为", "调整为", "更新为", "设置为", "设为") {
+		content := extractDecisionUpdateValue(text)
+		if content == "" {
+			content = cleanupDynamicSectionValue(textAfterAnyMarker(text, []string{"决策", "决定", "确认事项"}))
+		}
+		if content == "" {
+			return InteractionCommand{}, false
+		}
+		return InteractionCommand{
+			Intent:      "create_decision",
+			TargetType:  "decision",
+			Content:     content,
+			Confidence:  0.86,
+			NeedConfirm: false,
+			Reply:       "已识别为新增会议决策。",
+		}, true
+	}
+
+	if containsNormalizedPhrase(key, "合并") && len(decisions) > 0 {
+		sourceIndices := parseTargetOrdinals(text)
+		ids := []string{}
+		validIndices := []int{}
+		for _, index := range sourceIndices {
+			if index > 0 && index <= len(decisions) {
+				ids = append(ids, decisions[index-1].ID)
+				validIndices = append(validIndices, index)
+			}
+		}
+		if len(uniqueNonEmptyStrings(ids)) >= 2 {
+			content := extractDecisionMergeContent(text)
+			return InteractionCommand{
+				Intent:        "merge_decisions",
+				TargetType:    "decision",
+				SourceIndices: validIndices,
+				SourceIDs:     ids,
+				Content:       content,
+				Confidence:    0.88,
+				NeedConfirm:   false,
+				Reply:         fmt.Sprintf("已识别为合并 %d 条会议决策。", len(ids)),
+			}, true
+		}
+	}
+
+	index := parseOrdinalIndex(text)
+	if index <= 0 || index > len(decisions) {
+		return InteractionCommand{}, false
+	}
+	decision := decisions[index-1]
+
+	if containsNormalizedPhrase(key, "删除", "删掉", "去掉", "移除") {
+		return InteractionCommand{
+			Intent:      "delete_decision",
+			TargetType:  "decision",
+			TargetIndex: index,
+			TargetID:    decision.ID,
+			Confidence:  0.88,
+			NeedConfirm: false,
+			Reply:       fmt.Sprintf("已识别为删除第 %d 条会议决策。", index),
+		}, true
+	}
+
+	if isDecisionToActionItemInstruction(text) {
+		content := extractDecisionUpdateValue(text)
+		return InteractionCommand{
+			Intent:      "move_decision_to_action_item",
+			TargetType:  "decision",
+			TargetIndex: index,
+			TargetID:    decision.ID,
+			Task:        content,
+			Content:     content,
+			Confidence:  0.86,
+			NeedConfirm: false,
+			Reply:       fmt.Sprintf("已识别为将第 %d 条会议决策转为待办。", index),
+		}, true
+	}
+
+	value := extractDecisionUpdateValue(text)
+	if value == "" {
+		return InteractionCommand{}, false
+	}
+	return InteractionCommand{
+		Intent:      "update_decision",
+		TargetType:  "decision",
+		TargetIndex: index,
+		TargetID:    decision.ID,
+		Content:     value,
+		Confidence:  0.9,
+		NeedConfirm: false,
+		Reply:       fmt.Sprintf("已识别为修改第 %d 条会议决策。", index),
+	}, true
+}
+
+func isActionItemToDecisionInstruction(text string) bool {
+	key := normalizeForCompare(text)
+	if !containsNormalizedPhrase(key, "待办", "任务", "决策") || !containsNormalizedPhrase(key, "转为", "转成", "转换为", "移到", "改成") {
+		return false
+	}
+	actionPos := firstNormalizedPhraseIndex(text, "待办", "任务")
+	decisionPos := firstNormalizedPhraseIndex(text, "决策")
+	return actionPos >= 0 && decisionPos >= 0 && actionPos < decisionPos
+}
+
+func isDecisionToActionItemInstruction(text string) bool {
+	key := normalizeForCompare(text)
+	if !containsNormalizedPhrase(key, "决策", "待办", "任务") || !containsNormalizedPhrase(key, "转为", "转成", "转换为", "移到", "改成") {
+		return false
+	}
+	decisionPos := firstNormalizedPhraseIndex(text, "决策")
+	actionPos := firstNormalizedPhraseIndex(text, "待办", "任务")
+	return decisionPos >= 0 && actionPos >= 0 && decisionPos < actionPos
+}
+
+func firstNormalizedPhraseIndex(text string, phrases ...string) int {
+	key := normalizeForCompare(text)
+	best := -1
+	for _, phrase := range phrases {
+		index := strings.Index(key, normalizeForCompare(phrase))
+		if index >= 0 && (best < 0 || index < best) {
+			best = index
+		}
+	}
+	return best
+}
+
+func extractDecisionUpdateValue(text string) string {
+	markers := []string{
+		"决策内容改成", "决策内容改为", "决策内容调整为", "决策内容更新为",
+		"决策改成", "决策改为", "决策调整为", "决策更新为",
+		"决定改成", "决定改为", "确认事项改成", "确认事项改为",
+		"内容改成", "内容改为", "内容是", "内容为",
+		"改成", "改为", "调整为", "更新为", "设置为", "设为",
+		"新增一条决策", "新增一个决策", "新增决策",
+		"添加一条决策", "添加一个决策", "添加决策",
+		"补充一条决策", "补充一个决策", "补充决策",
+		"创建一条决策", "创建一个决策", "创建决策",
+		"记录一条决策", "记录一个决策", "记录决策",
+		"决策是", "决策为", "决定是", "决定为",
+	}
+	return cleanupDynamicSectionValue(textAfterAnyMarker(text, markers))
+}
+
+func extractDecisionMergeContent(text string) string {
+	content := textAfterAnyMarker(text, []string{
+		"合并为", "合并成", "整合为", "整合成", "归并为", "归并成",
+		"改成", "改为", "调整为", "更新为", "设置为", "设为",
+	})
+	return cleanupDynamicSectionValue(content)
 }
 
 func extractOpenQuestionUpdateValue(text string) string {
