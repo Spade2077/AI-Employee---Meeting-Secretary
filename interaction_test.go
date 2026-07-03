@@ -184,6 +184,45 @@ func TestInteractionEditModeConsumesCommandsUntilExit(t *testing.T) {
 	}
 }
 
+func TestInteractionModeCommandsIgnoreBusinessContent(t *testing.T) {
+	if !isEnterInteractionModeCommand("进入修改模式") {
+		t.Fatal("expected direct enter mode command to be recognized")
+	}
+	if !isExitInteractionModeCommand("退出修改模式") {
+		t.Fatal("expected direct exit mode command to be recognized")
+	}
+	if isExitInteractionModeCommand("把会议标题改成退出修改模式") {
+		t.Fatal("business title update should not trigger exit mode")
+	}
+	if isEnterInteractionModeCommand("新增一个动态模块叫进入修改模式") {
+		t.Fatal("business dynamic section creation should not trigger enter mode")
+	}
+	if isExitInteractionModeCommand("不要退出修改模式，继续帮我改") {
+		t.Fatal("negated exit instruction should not trigger exit mode")
+	}
+}
+
+func TestLocalSystemCommandsIgnoreBusinessContent(t *testing.T) {
+	if _, ok := parseEndMeetingLocally("把第一条风险处理方案改成会议结束后再确认"); ok {
+		t.Fatal("business risk update should not trigger end meeting")
+	}
+	if _, ok := parseShowShareQRLocally("把第一条决策改成不要展示二维码作为主流程"); ok {
+		t.Fatal("business decision update should not trigger qr display")
+	}
+	if _, ok := parseMeetingViewLocally("不要切换到会议总结，继续停留在实时记录"); ok {
+		t.Fatal("negated page switch should not trigger meeting view switch")
+	}
+	if _, ok := parseEndMeetingLocally("结束会议"); !ok {
+		t.Fatal("direct end meeting command should still be recognized")
+	}
+	if _, ok := parseShowShareQRLocally("显示二维码"); !ok {
+		t.Fatal("direct qr display command should still be recognized")
+	}
+	if _, ok := parseMeetingViewLocally("切换到会议总结页面"); !ok {
+		t.Fatal("direct page switch command should still be recognized")
+	}
+}
+
 func TestInteractionCommandExecutionCoversSupportedIntents(t *testing.T) {
 	ctx := context.Background()
 	store, meetingID := newInteractionStore(t, ctx)
@@ -257,7 +296,7 @@ func TestInteractionCommandExecutionCoversSupportedIntents(t *testing.T) {
 	if len(decisions) != 1 || !strings.Contains(decisions[0].Content, "Volcano ASR") {
 		t.Fatalf("expected moved decision, got %#v", decisions)
 	}
-	if !strings.HasPrefix(decisions[0].SourceText, "待办：") || !strings.Contains(decisions[0].SourceText, "Investigate ASR connection keepalive") {
+	if !strings.HasPrefix(decisions[0].SourceText, "由待办转为决策：") || !strings.Contains(decisions[0].SourceText, "Investigate ASR connection keepalive") {
 		t.Fatalf("expected moved decision source to mention original action item, got %q", decisions[0].SourceText)
 	}
 
@@ -970,25 +1009,28 @@ func TestUndoUpdateDecisionInteraction(t *testing.T) {
 func TestLocalDecisionParserUpdatesFirstDecision(t *testing.T) {
 	ctx := context.Background()
 	store, meetingID := newInteractionStore(t, ctx)
-	server := &Server{store: store, hub: NewHub()}
 
-	first, err := store.CreateDecision(ctx, meetingID, "第一版演示先使用云端 ASR。", "test")
-	if err != nil {
+	if _, err := store.CreateDecision(ctx, meetingID, "第一版演示先使用云端 ASR。", "test"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.CreateDecision(ctx, meetingID, "现场网络异常时使用预录文本兜底。", "test"); err != nil {
 		t.Fatal(err)
 	}
-
-	command, _, err := server.parseInteractionCommand(ctx, meetingID, "把第一条决策改成第一版演示重点展示会中语音交互能力", newInteractionTiming(interactionTimingSeed{}))
+	snapshot, err := store.GetIntelligenceSnapshot(ctx, meetingID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if command.Intent != "update_decision" || command.TargetIndex != 1 || command.TargetID != first.ID {
+
+	command, ok := parseDecisionMutationLocally("把第一条决策改成第一版演示重点展示会中语音交互能力", snapshot)
+	if !ok {
+		t.Fatal("expected local decision parser to produce command")
+	}
+	if command.Intent != "update_decision" || command.TargetIndex != 1 {
 		t.Fatalf("expected first decision update command, got %#v", command)
 	}
 
-	snapshot, _, err := server.executeInteractionCommand(ctx, meetingID, command)
+	server := &Server{store: store, hub: NewHub()}
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, command)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1000,14 +1042,27 @@ func TestLocalDecisionParserUpdatesFirstDecision(t *testing.T) {
 func TestDecisionUpdateWithUndoWordDoesNotTriggerUndo(t *testing.T) {
 	ctx := context.Background()
 	store, meetingID := newInteractionStore(t, ctx)
-	server := &Server{store: store, hub: NewHub()}
+	if _, err := store.SaveLLMConfigFor(ctx, LLMUseCaseInteraction, LLMConfig{BaseURL: "https://llm.example/v1", Model: "test-model"}); err != nil {
+		t.Fatal(err)
+	}
 
-	first, err := store.CreateDecision(ctx, meetingID, "第一版演示先使用云端 ASR。", "test")
-	if err != nil {
+	if _, err := store.CreateDecision(ctx, meetingID, "第一版演示先使用云端 ASR。", "test"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.CreateDecision(ctx, meetingID, "现场网络异常时使用预录文本兜底。", "test"); err != nil {
 		t.Fatal(err)
+	}
+	server := &Server{
+		store: store,
+		hub:   NewHub(),
+		llmClient: fakeLLMClient{content: `{
+			"intent": "update_decision",
+			"target_type": "decision",
+			"target_index": 1,
+			"content": "正式演示，优先展示会中语音和修改撤销能力",
+			"confidence": 0.96,
+			"need_confirm": false
+		}`},
 	}
 
 	command, _, err := server.parseInteractionCommand(ctx, meetingID, "把第一条决策改为正式演示，优先展示会中语音和修改撤销能力", newInteractionTiming(interactionTimingSeed{}))
@@ -1017,7 +1072,7 @@ func TestDecisionUpdateWithUndoWordDoesNotTriggerUndo(t *testing.T) {
 	if command.Intent == "undo_last_interaction" {
 		t.Fatalf("expected decision update, not undo: %#v", command)
 	}
-	if command.Intent != "update_decision" || command.TargetIndex != 1 || command.TargetID != first.ID {
+	if command.Intent != "update_decision" || command.TargetIndex != 1 {
 		t.Fatalf("expected first decision update command, got %#v", command)
 	}
 	if !strings.Contains(command.Content, "撤销能力") {
@@ -1038,9 +1093,20 @@ func TestUndoParserRequiresUndoAsPrimaryAction(t *testing.T) {
 func TestInteractionCommandWaitsForStableTranscript(t *testing.T) {
 	ctx := context.Background()
 	store, meetingID := newInteractionStore(t, ctx)
+	if _, err := store.SaveLLMConfigFor(ctx, LLMUseCaseInteraction, LLMConfig{BaseURL: "https://llm.example/v1", Model: "test-model"}); err != nil {
+		t.Fatal(err)
+	}
 	server := &Server{
-		store:               store,
-		hub:                 NewHub(),
+		store: store,
+		hub:   NewHub(),
+		llmClient: fakeLLMClient{content: `{
+			"intent": "create_open_question",
+			"target_type": "open_question",
+			"question": "客户现场是否允许接入外网",
+			"content": "客户现场是否允许接入外网",
+			"confidence": 0.95,
+			"need_confirm": false
+		}`},
 		pendingInteractions: map[string]*PendingInteraction{},
 		recentInteractions:  map[string][]recentInteractionTranscript{},
 	}
@@ -1431,9 +1497,13 @@ func TestLocalDynamicSectionParserDoesNotTreatAddOneItemAsFirstModule(t *testing
 		t.Fatal(err)
 	}
 
-	command, _, err := server.parseInteractionCommand(ctx, meetingID, "给供应商限制模块补充一条，摄像头到货时间最晚不能超过周三", newInteractionTiming(interactionTimingSeed{}))
+	snapshot, err := store.GetIntelligenceSnapshot(ctx, meetingID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	command, ok := parseDynamicSectionMutationLocally("给供应商限制模块补充一条，摄像头到货时间最晚不能超过周三", snapshot)
+	if !ok {
+		t.Fatal("expected local dynamic section parser to produce command")
 	}
 	if command.Intent != "add_dynamic_section_item" {
 		t.Fatalf("expected add dynamic section item intent, got %#v", command)
@@ -1445,7 +1515,7 @@ func TestLocalDynamicSectionParserDoesNotTreatAddOneItemAsFirstModule(t *testing
 		t.Fatalf("expected only appended content, got %#v", command)
 	}
 
-	snapshot, _, err := server.executeInteractionCommand(ctx, meetingID, command)
+	snapshot, _, err = server.executeInteractionCommand(ctx, meetingID, command)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1478,9 +1548,13 @@ func TestInteractionCommandDeletesAndMergesDynamicSections(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	command, _, err := server.parseInteractionCommand(ctx, meetingID, "删除第 3 个动态模块", newInteractionTiming(interactionTimingSeed{}))
+	currentSnapshot, err := store.GetIntelligenceSnapshot(ctx, meetingID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	command, ok := parseDynamicSectionDeleteMergeLocally("删除第 3 个动态模块", currentSnapshot)
+	if !ok {
+		t.Fatal("expected local dynamic section delete parser to produce command")
 	}
 	if command.Intent != "delete_dynamic_section" || command.TargetID != third.ID {
 		t.Fatalf("expected delete third dynamic section command, got %#v", command)
@@ -1546,9 +1620,13 @@ func TestDynamicSectionMergeUsesOnlyExplicitSources(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	command, _, err := server.parseInteractionCommand(ctx, meetingID, "把第一条和第二条动态模块合并为一条，改名为成本控制结果", newInteractionTiming(interactionTimingSeed{}))
+	currentSnapshot, err := store.GetIntelligenceSnapshot(ctx, meetingID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	command, ok := parseDynamicSectionDeleteMergeLocally("把第一条和第二条动态模块合并为一条，改名为成本控制结果", currentSnapshot)
+	if !ok {
+		t.Fatal("expected local dynamic section merge parser to produce command")
 	}
 	if command.Intent != "merge_dynamic_sections" {
 		t.Fatalf("expected merge dynamic sections intent, got %#v", command)
@@ -1584,9 +1662,13 @@ func TestDynamicSectionRenameAndCleanupAreGeneric(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command, _, err := server.parseInteractionCommand(ctx, meetingID, "把第一个动态模块改名为成本控制", newInteractionTiming(interactionTimingSeed{}))
+	currentSnapshot, err := store.GetIntelligenceSnapshot(ctx, meetingID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	command, ok := parseDynamicSectionMutationLocally("把第一个动态模块改名为成本控制", currentSnapshot)
+	if !ok {
+		t.Fatal("expected local dynamic section rename parser to produce command")
 	}
 	if command.Intent != "update_dynamic_section" || command.TargetID != section.ID || command.Title != "成本控制" {
 		t.Fatalf("expected dynamic section rename command, got %#v", command)
@@ -1639,9 +1721,13 @@ func TestLocalRiskMutationParserUsesRequestedIndex(t *testing.T) {
 	if _, err := store.CreateRisk(ctx, meetingID, RiskMutation{Content: "Backup power may be insufficient", Status: "open"}); err != nil {
 		t.Fatal(err)
 	}
-	command, _, err := server.parseInteractionCommand(ctx, meetingID, "修改第一条风险的方案，改成提前准备备用麦克风并安排现场复测", newInteractionTiming(interactionTimingSeed{}))
+	currentSnapshot, err := store.GetIntelligenceSnapshot(ctx, meetingID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	command, ok := parseRiskMutationLocally("修改第一条风险的方案，改成提前准备备用麦克风并安排现场复测", currentSnapshot)
+	if !ok {
+		t.Fatal("expected local risk parser to produce command")
 	}
 	if command.Intent != "update_risk" || command.TargetIndex != 1 || command.Mitigation == "" {
 		t.Fatalf("expected local risk mitigation update for first risk, got %#v", command)
@@ -1670,9 +1756,13 @@ func TestLocalOpenQuestionParserBeatsRiskFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	command, _, err := server.parseInteractionCommand(ctx, meetingID, "把第四条待确认问题的截止时间改为周三下午。", newInteractionTiming(interactionTimingSeed{}))
+	currentSnapshot, err := store.GetIntelligenceSnapshot(ctx, meetingID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	command, ok := parseOpenQuestionMutationLocally("把第四条待确认问题的截止时间改为周三下午。", currentSnapshot)
+	if !ok {
+		t.Fatal("expected local open question parser to produce command")
 	}
 	if command.Intent != "update_open_question" || command.TargetType != "open_question" || command.TargetIndex != 4 || command.DueDate != "周三下午" {
 		t.Fatalf("expected local open question due date update, got %#v", command)
@@ -1709,9 +1799,13 @@ func TestLocalOpenQuestionParserDeletesMultipleExplicitTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	command, _, err := server.parseInteractionCommand(ctx, meetingID, "删除第 3 和第 4 条待确认问题", newInteractionTiming(interactionTimingSeed{}))
+	currentSnapshot, err := store.GetIntelligenceSnapshot(ctx, meetingID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	command, ok := parseOpenQuestionMutationLocally("删除第 3 和第 4 条待确认问题", currentSnapshot)
+	if !ok {
+		t.Fatal("expected local open question bulk delete parser to produce command")
 	}
 	if command.Intent != "delete_open_questions" || len(command.SourceIDs) != 2 {
 		t.Fatalf("expected bulk open question delete, got %#v", command)
@@ -1756,6 +1850,35 @@ func TestDynamicSectionTitleAfterModuleNameMarker(t *testing.T) {
 		if command.Content != "" {
 			t.Fatalf("expected empty content for title-only command %q, got %#v", instruction, command)
 		}
+	}
+}
+
+func TestBusinessInteractionUsesLLMInsteadOfLocalParser(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	if _, err := store.SaveLLMConfigFor(ctx, LLMUseCaseInteraction, LLMConfig{BaseURL: "https://llm.example/v1", Model: "test-model"}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		store: store,
+		hub:   NewHub(),
+		llmClient: fakeLLMClient{content: `{
+			"intent": "create_dynamic_section",
+			"target_type": "dynamic_section",
+			"title": "LLM解析的观众反馈",
+			"section_title": "LLM解析的观众反馈",
+			"content": "",
+			"confidence": 0.96,
+			"need_confirm": false
+		}`},
+	}
+
+	command, _, err := server.parseInteractionCommand(ctx, meetingID, "新增一个动态模块叫观众反馈", newInteractionTiming(interactionTimingSeed{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Intent != "create_dynamic_section" || command.SectionTitle != "LLM解析的观众反馈" {
+		t.Fatalf("expected business command to be parsed by LLM, got %#v", command)
 	}
 }
 
@@ -1811,9 +1934,9 @@ func TestConciseSummaryCommandActuallyShortensSummary(t *testing.T) {
 	if _, err := store.RewriteSummary(ctx, meetingID, longSummary); err != nil {
 		t.Fatal(err)
 	}
-	command, _, err := server.parseInteractionCommand(ctx, meetingID, "把摘要改的简短一点", newInteractionTiming(interactionTimingSeed{}))
-	if err != nil {
-		t.Fatal(err)
+	command, ok := parseSummaryRewriteLocally("把摘要改的简短一点")
+	if !ok {
+		t.Fatal("expected local summary rewrite parser to produce command")
 	}
 	if command.Intent != "rewrite_summary_section" || !commandRequestsConciseSummary(command) {
 		t.Fatalf("expected concise summary command, got %#v", command)
@@ -1947,9 +2070,13 @@ func TestOpenQuestionCreateKeepsShiFouAndDeduplicates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	command, _, err := server.parseInteractionCommand(ctx, meetingID, "新增一个待确认问题，客户现场是否允许接入外网？", newInteractionTiming(interactionTimingSeed{}))
+	currentSnapshot, err := store.GetIntelligenceSnapshot(ctx, meetingID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	command, ok := parseOpenQuestionMutationLocally("新增一个待确认问题，客户现场是否允许接入外网？", currentSnapshot)
+	if !ok {
+		t.Fatal("expected local open question create parser to produce command")
 	}
 	if command.Intent != "create_open_question" || !strings.Contains(command.Question, "是否允许接入外网") {
 		t.Fatalf("expected open question create command with 是否, got %#v", command)

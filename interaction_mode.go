@@ -24,6 +24,9 @@ func isEnterInteractionModeCommand(text string) bool {
 	if key == "" || isExitInteractionModeCommand(text) {
 		return false
 	}
+	if !canTreatAsInteractionModeControl(text) {
+		return false
+	}
 	patterns := []string{
 		"进入修改模式",
 		"开启修改模式",
@@ -52,6 +55,9 @@ func isExitInteractionModeCommand(text string) bool {
 	if key == "" {
 		return false
 	}
+	if !canTreatAsInteractionModeControl(text) {
+		return false
+	}
 	patterns := []string{
 		"退出修改模式",
 		"关闭修改模式",
@@ -73,6 +79,30 @@ func isExitInteractionModeCommand(text string) bool {
 		}
 	}
 	return false
+}
+
+func canTreatAsInteractionModeControl(text string) bool {
+	key := normalizeForCompare(text)
+	if key == "" {
+		return false
+	}
+	// 模式控制是系统级命令。只要句子像是在修改业务内容，就交给 Interaction LLM，
+	// 避免“把标题改成退出修改模式”这类内容误触发退出。
+	if looksLikeBusinessMutationInstruction(text) {
+		return false
+	}
+	if looksLikeNegatedSystemControl(text) {
+		return false
+	}
+	return true
+}
+
+func looksLikeNegatedSystemControl(text string) bool {
+	key := normalizeForCompare(text)
+	if key == "" {
+		return false
+	}
+	return containsNormalizedPhrase(key, "不要", "别", "先别", "不用", "无需", "不是")
 }
 
 func (s *Server) enableInteractionEditMode(meetingID, reason string, now time.Time) {

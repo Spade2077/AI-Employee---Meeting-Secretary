@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { apiPath, fetchJSON, wsPath } from "./api.js";
 
 const EMPTY_SNAPSHOT = {
@@ -51,8 +51,10 @@ const INTERACTION_STEPS = [
 ];
 
 const ITEM_MOTION_MS = 9600;
-const DELETE_MOTION_MS = 6200;
+const DELETE_MOTION_MS = 5200;
+const DELETE_FILL_MOTION_MS = 980;
 const MODAL_TRANSITION_MS = 420;
+const TARGET_AUDIO_SAMPLE_RATE = 16000;
 
 const INSIGHT_COLLECTIONS = [
   ...(MEETING_FRAMEWORK_UI_ENABLED ? [{ key: "frameworkSections" }] : []),
@@ -709,6 +711,76 @@ function useAnimatedInsightItems(items, collectionKey, motionMarks, motionRun) {
   return animatedItems;
 }
 
+function useInsightListLayoutMotion(itemsRef, animatedItems, motionRun) {
+  const previousRects = useRef(new Map());
+
+  useLayoutEffect(() => {
+    const element = itemsRef.current;
+    if (!element) return undefined;
+    const prefersReducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+
+    const previous = previousRects.current;
+    const nodes = Array.from(element.querySelectorAll(".insight-item[data-motion-key]"));
+    const containerRect = element.getBoundingClientRect();
+    const scrollTop = element.scrollTop;
+    const ghostNodes = nodes.filter((node) => node.dataset.motionGhost === "true" && node.classList.contains("motion-deleting"));
+    const hasDeletingGhost = ghostNodes.length > 0;
+
+    ghostNodes.forEach((node) => {
+      const key = node.dataset.motionKey || "";
+      const oldRect = previous.get(key);
+      const fallbackTop = node.offsetTop;
+      const top = oldRect ? oldRect.top - containerRect.top + scrollTop : fallbackTop;
+      const height = oldRect ? oldRect.height : node.offsetHeight;
+      node.style.position = "absolute";
+      node.style.top = `${Math.max(0, top)}px`;
+      node.style.left = "10px";
+      node.style.right = "10px";
+      node.style.width = "auto";
+      node.style.height = `${Math.max(1, height)}px`;
+      node.style.zIndex = "5";
+    });
+
+    if (hasDeletingGhost && !prefersReducedMotion) {
+      // 先让删除残影脱离文档流，再计算剩余条目的真实位置，避免列表出现“空位后刷新”。
+      element.getBoundingClientRect();
+      nodes.forEach((node) => {
+        if (node.dataset.motionGhost === "true") return;
+        const key = node.dataset.motionKey || "";
+        const oldRect = previous.get(key);
+        if (!oldRect) return;
+        const newRect = node.getBoundingClientRect();
+        const deltaX = oldRect.left - newRect.left;
+        const deltaY = oldRect.top - newRect.top;
+        if (Math.abs(deltaX) < 1 && Math.abs(deltaY) < 1) return;
+        const overshootY = Math.abs(deltaY) >= 16 ? (deltaY > 0 ? -4 : 4) : 0;
+        node.animate(
+          [
+            { offset: 0, transform: `translate(${deltaX}px, ${deltaY}px)` },
+            { offset: 0.58, transform: `translate(${deltaX * 0.08}px, ${deltaY * 0.18}px)` },
+            { offset: 0.82, transform: `translate(0, ${overshootY}px)` },
+            { offset: 1, transform: "translate(0, 0)" }
+          ],
+          {
+            duration: DELETE_FILL_MOTION_MS,
+            easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+            fill: "both"
+          }
+        );
+      });
+    }
+
+    previousRects.current = new Map(
+      nodes
+        .filter((node) => node.dataset.motionGhost !== "true")
+        .map((node) => [node.dataset.motionKey || "", node.getBoundingClientRect()])
+        .filter(([key]) => key)
+    );
+
+    return undefined;
+  }, [animatedItems, itemsRef, motionRun]);
+}
+
 function usePresence(open, duration = MODAL_TRANSITION_MS) {
   const [rendered, setRendered] = useState(open);
   const [phase, setPhase] = useState(open ? "open" : "closed");
@@ -737,6 +809,50 @@ function usePresence(open, duration = MODAL_TRANSITION_MS) {
   return { rendered, phase };
 }
 
+function createEmptyAudioState() {
+  return {
+    ws: null,
+    context: null,
+    stream: null,
+    source: null,
+    processor: null,
+    meetingID: "",
+    active: false
+  };
+}
+
+function targetSampleCount(inputLength, sourceRate, targetRate) {
+  return Math.max(1, Math.round(inputLength * targetRate / sourceRate));
+}
+
+function resampleToPCM16(input, sourceRate, targetRate) {
+  const outputLength = targetSampleCount(input.length, sourceRate, targetRate);
+  const buffer = new ArrayBuffer(outputLength * 2);
+  const view = new DataView(buffer);
+  const ratio = sourceRate / targetRate;
+
+  for (let index = 0; index < outputLength; index += 1) {
+    const sourceIndex = index * ratio;
+    const left = Math.floor(sourceIndex);
+    const right = Math.min(left + 1, input.length - 1);
+    const weight = sourceIndex - left;
+    const sample = input[left] * (1 - weight) + input[right] * weight;
+    const clamped = Math.max(-1, Math.min(1, sample));
+    view.setInt16(index * 2, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
+  }
+
+  return buffer;
+}
+
+function floatPeakToPCM(input) {
+  let peak = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    const value = Math.abs(input[index]);
+    if (value > peak) peak = value;
+  }
+  return Math.round(Math.min(1, peak) * 32767);
+}
+
 export default function App() {
   const routeMeetingID = useRef(parseRouteMeetingID());
   const currentMeetingID = useRef("");
@@ -744,6 +860,8 @@ export default function App() {
   const actualSnapshotRef = useRef(EMPTY_SNAPSHOT);
   const duplicateSnapshotRef = useRef(null);
   const motionTimers = useRef([]);
+  const previousStatusRef = useRef("standby");
+  const audioRef = useRef(createEmptyAudioState());
 
   const [meeting, setMeeting] = useState(null);
   const [meetingID, setMeetingID] = useState("");
@@ -766,6 +884,10 @@ export default function App() {
   const [shareOpen, setShareOpen] = useState(false);
   const [endConfirmOpen, setEndConfirmOpen] = useState(false);
   const [interactionCollapsed, setInteractionCollapsed] = useState(() => localStorage.getItem("interactionDockCollapsed") !== "false");
+  const [hostControlOpen, setHostControlOpen] = useState(false);
+  const [hostBusy, setHostBusy] = useState("");
+  const [hostError, setHostError] = useState("");
+  const [micState, setMicState] = useState({ status: "idle", message: "麦克风未连接", peak: 0, packets: 0 });
   const [meetingTypeSaving, setMeetingTypeSaving] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState("正在连接会议服务...");
   const [socketState, setSocketState] = useState("connecting");
@@ -857,11 +979,178 @@ export default function App() {
     });
   }, []);
 
+  const bindRouteToMeeting = useCallback((id) => {
+    if (!id) return;
+    routeMeetingID.current = id;
+    const nextPath = `/meeting/${encodeURIComponent(id)}`;
+    const nextURL = `${nextPath}${window.location.search || ""}`;
+    if (window.location.pathname !== nextPath) {
+      window.history.replaceState(null, "", nextURL);
+    }
+  }, []);
+
+  const stopMeetingAudio = useCallback((closeSocket = true) => {
+    const current = audioRef.current;
+    current.active = false;
+
+    const ws = current.ws;
+    current.ws = null;
+    current.meetingID = "";
+    if (closeSocket && ws) {
+      try { ws.onclose = null; } catch {}
+      try { ws.onerror = null; } catch {}
+      if (ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: "end" })); } catch {}
+      }
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        try { ws.close(); } catch {}
+      }
+    }
+
+    if (current.processor) {
+      try { current.processor.disconnect(); } catch {}
+      current.processor = null;
+    }
+    if (current.source) {
+      try { current.source.disconnect(); } catch {}
+      current.source = null;
+    }
+    if (current.stream) {
+      try { current.stream.getTracks().forEach((track) => track.stop()); } catch {}
+      current.stream = null;
+    }
+    if (current.context) {
+      try { current.context.close(); } catch {}
+      current.context = null;
+    }
+
+    setMicState({ status: "idle", message: "麦克风未连接", peak: 0, packets: 0 });
+  }, []);
+
+  const startMeetingAudio = useCallback(async (targetMeetingID) => {
+    if (!targetMeetingID) {
+      throw new Error("请先创建会议。");
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("当前浏览器不支持麦克风采集。");
+    }
+    const current = audioRef.current;
+    if (current.active && current.ws?.readyState === WebSocket.OPEN && current.meetingID === targetMeetingID) {
+      return;
+    }
+
+    stopMeetingAudio();
+    setMicState({ status: "connecting", message: "正在打开麦克风", peak: 0, packets: 0 });
+
+    const ws = new WebSocket(wsPath(`/api/meetings/${encodeURIComponent(targetMeetingID)}/audio/ws`));
+    ws.binaryType = "arraybuffer";
+    audioRef.current.ws = ws;
+    audioRef.current.meetingID = targetMeetingID;
+
+    ws.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === "audio_metrics") {
+          setMicState((state) => ({
+            ...state,
+            status: "connected",
+            message: "麦克风已连接",
+            peak: Number(message.peak) || state.peak || 0,
+            packets: Number(message.packets) || state.packets || 0
+          }));
+        }
+        if (message.type === "audio_blocked") {
+          setMicState((state) => ({ ...state, message: "会议未在记录中，音频暂未送入 ASR" }));
+        }
+      } catch {}
+    };
+    ws.onclose = () => {
+      if (audioRef.current.meetingID === targetMeetingID) {
+        stopMeetingAudio(false);
+      }
+    };
+    ws.onerror = () => {
+      if (audioRef.current.meetingID === targetMeetingID) {
+        setMicState((state) => ({ ...state, status: "error", message: "音频连接异常" }));
+      }
+    };
+
+    await new Promise((resolve, reject) => {
+      ws.onopen = resolve;
+      ws.onerror = () => reject(new Error("音频 WebSocket 连接失败"));
+    });
+    ws.onerror = () => {
+      if (audioRef.current.meetingID === targetMeetingID) {
+        setMicState((state) => ({ ...state, status: "error", message: "音频连接异常" }));
+      }
+    };
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: TARGET_AUDIO_SAMPLE_RATE,
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      }
+    });
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) {
+      stream.getTracks().forEach((track) => track.stop());
+      throw new Error("当前浏览器不支持 AudioContext。");
+    }
+
+    const context = new AudioContextCtor({ sampleRate: TARGET_AUDIO_SAMPLE_RATE });
+    const source = context.createMediaStreamSource(stream);
+    const processor = context.createScriptProcessor(1024, 1, 1);
+    const sourceRate = context.sampleRate || TARGET_AUDIO_SAMPLE_RATE;
+    const audioState = audioRef.current;
+    audioState.context = context;
+    audioState.stream = stream;
+    audioState.source = source;
+    audioState.processor = processor;
+    audioState.active = true;
+
+    processor.onaudioprocess = (event) => {
+      const state = audioRef.current;
+      if (!state.active || !state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+      const input = event.inputBuffer.getChannelData(0);
+      const peak = floatPeakToPCM(input);
+      setMicState((previous) => ({ ...previous, status: "connected", message: "麦克风已连接", peak }));
+      state.ws.send(resampleToPCM16(input, sourceRate, TARGET_AUDIO_SAMPLE_RATE));
+    };
+
+    source.connect(processor);
+    processor.connect(context.destination);
+    stream.getTracks().forEach((track) => {
+      track.enabled = true;
+    });
+    setMicState((state) => ({ ...state, status: "connected", message: "麦克风已连接" }));
+  }, [stopMeetingAudio]);
+
   const endMeeting = useCallback(async () => {
     if (!meetingID) return;
-    await fetchJSON(`/api/meetings/${encodeURIComponent(meetingID)}/end`, { method: "POST" });
-    setEndConfirmOpen(false);
-  }, [meetingID]);
+    setHostBusy("end");
+    setHostError("");
+    try {
+      stopMeetingAudio();
+      const update = await fetchJSON(`/api/meetings/${encodeURIComponent(meetingID)}/end`, { method: "POST" });
+      const nextStatus = update?.meeting?.status || update?.status || "";
+      if (update?.meeting) {
+        setMeeting(update.meeting);
+        setStatus(nextStatus || "standby");
+        setDurationSeconds(update.meeting.durationSeconds || update.durationSeconds || 0);
+      }
+      setEndConfirmOpen(false);
+      if (nextStatus === "ended") {
+        setShareOpen(true);
+      }
+    } catch (error) {
+      setHostError(error.message || "结束会议失败");
+    } finally {
+      setHostBusy("");
+    }
+  }, [meetingID, stopMeetingAudio]);
 
   const updateMeetingType = useCallback(async (nextType) => {
     if (!meetingID || !nextType) return;
@@ -912,6 +1201,53 @@ export default function App() {
     }
   }, [acceptMeetingID, loadMeetingData]);
 
+  const createMeetingFromDisplay = useCallback(async () => {
+    setHostBusy("create");
+    setHostError("");
+    try {
+      stopMeetingAudio();
+      const update = await fetchJSON("/api/meetings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "展示会议", type: "general", operator: "display" })
+      });
+      const id = update?.meetingId || update?.meeting?.id || "";
+      if (id) {
+        bindRouteToMeeting(id);
+      }
+      applyStateUpdate(update);
+      if (id) {
+        await loadMeetingData(id);
+      }
+    } catch (error) {
+      setHostError(error.message || "创建会议失败");
+    } finally {
+      setHostBusy("");
+    }
+  }, [applyStateUpdate, bindRouteToMeeting, loadMeetingData, stopMeetingAudio]);
+
+  const startMeetingFromDisplay = useCallback(async () => {
+    if (!meetingID) {
+      setHostError("请先创建会议。");
+      return;
+    }
+    setHostBusy("start");
+    setHostError("");
+    try {
+      if (status !== "recording") {
+        const update = await fetchJSON(`/api/meetings/${encodeURIComponent(meetingID)}/start`, { method: "POST" });
+        applyStateUpdate(update);
+      }
+      await startMeetingAudio(meetingID);
+    } catch (error) {
+      stopMeetingAudio();
+      setHostError(error.message || "开始会议或打开麦克风失败");
+      setMicState((state) => ({ ...state, status: "error", message: "麦克风未开启" }));
+    } finally {
+      setHostBusy("");
+    }
+  }, [applyStateUpdate, meetingID, startMeetingAudio, status, stopMeetingAudio]);
+
   const hydrate = useCallback(async () => {
     try {
       const routedID = routeMeetingID.current;
@@ -942,6 +1278,8 @@ export default function App() {
 
   useEffect(() => () => clearMotionTimers(), [clearMotionTimers]);
 
+  useEffect(() => () => stopMeetingAudio(), [stopMeetingAudio]);
+
   useEffect(() => {
     if (!meeting?.startedAt || status === "ended") return undefined;
     const started = new Date(meeting.startedAt).getTime();
@@ -951,6 +1289,15 @@ export default function App() {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [meeting?.startedAt, status]);
+
+  useEffect(() => {
+    const previousStatus = previousStatusRef.current;
+    previousStatusRef.current = status;
+    if (!meetingID || status !== "ended" || previousStatus === "ended") return;
+    stopMeetingAudio();
+    setEndConfirmOpen(false);
+    setShareOpen(true);
+  }, [meetingID, status, stopMeetingAudio]);
 
   useEffect(() => {
     if (!interactionMode.active || !interactionMode.expiresAt) return undefined;
@@ -1141,6 +1488,19 @@ export default function App() {
           collapsed={interactionCollapsed}
           onToggle={toggleInteractionDock}
         />
+        <HostControlDock
+          open={hostControlOpen}
+          meetingID={meetingID}
+          status={status}
+          busy={hostBusy}
+          error={hostError}
+          micState={micState}
+          onToggle={() => setHostControlOpen((value) => !value)}
+          onCreate={createMeetingFromDisplay}
+          onStart={startMeetingFromDisplay}
+          onRequestEnd={() => setEndConfirmOpen(true)}
+          onOpenShare={() => setShareOpen(true)}
+        />
       </section>
 
       <ShareModal
@@ -1219,6 +1579,68 @@ function Header({ title, type, meetingID, status, duration, socketState, interac
         </button>
       </nav>
     </header>
+  );
+}
+
+function HostControlDock({ open, meetingID, status, busy, error, micState, onToggle, onCreate, onStart, onRequestEnd, onOpenShare }) {
+  const hasMeeting = Boolean(meetingID);
+  const recording = status === "recording";
+  const ended = status === "ended";
+  const standby = status === "standby";
+  const ending = status === "ending";
+  const micConnected = micState?.status === "connected";
+  const micPercent = Math.max(0, Math.min(100, Math.round(((micState?.peak || 0) / 3000) * 100)));
+
+  return (
+    <aside className={`host-control ${open ? "open" : "collapsed"} ${busy ? "busy" : ""}`} aria-label="主持控制">
+      <button type="button" className="host-control-toggle" onClick={onToggle} aria-expanded={open}>
+        主持
+      </button>
+      <div className="host-control-panel" aria-hidden={!open}>
+        <div className="host-control-head">
+          <div>
+            <p className="panel-kicker">Host Control</p>
+            <h2>主持控制</h2>
+          </div>
+          <span className={`host-state ${recording ? "good" : ended ? "quiet" : "warn"}`}>{STATUS_LABELS[status] || status}</span>
+        </div>
+
+        <div className="mic-meter" data-state={micState?.status || "idle"}>
+          <div>
+            <strong>{micConnected ? "麦克风已开启" : micState?.status === "connecting" ? "正在连接麦克风" : "麦克风未开启"}</strong>
+            <span>{micState?.message || "等待开始会议"}</span>
+          </div>
+          <div className="mic-meter-track" aria-hidden="true">
+            <i style={{ width: `${micPercent}%` }} />
+          </div>
+        </div>
+
+        <div className="host-actions">
+          {!hasMeeting ? (
+            <button type="button" className="primary-action" disabled={Boolean(busy)} onClick={onCreate}>
+              {busy === "create" ? "创建中" : "创建会议"}
+            </button>
+          ) : null}
+          {hasMeeting && (standby || recording) ? (
+            <button type="button" className="primary-action" disabled={Boolean(busy)} onClick={onStart}>
+              {busy === "start" ? "启动中" : recording && micConnected ? "重新打开麦克风" : "开始会议并打开麦克风"}
+            </button>
+          ) : null}
+          {hasMeeting && recording ? (
+            <button type="button" className="danger-action" disabled={Boolean(busy)} onClick={onRequestEnd}>
+              结束会议
+            </button>
+          ) : null}
+          {hasMeeting && (ending || ended) ? (
+            <button type="button" className="primary-action" disabled={Boolean(busy && !ended)} onClick={onOpenShare}>
+              显示二维码
+            </button>
+          ) : null}
+        </div>
+
+        {error ? <p className="host-error">{error}</p> : null}
+      </div>
+    </aside>
   );
 }
 
@@ -1490,6 +1912,7 @@ function InsightList({ title, collectionKey, items, empty, motionMarks, motionRu
   const sourceItems = Array.isArray(items) ? items : [];
   const animatedItems = useAnimatedInsightItems(sourceItems, collectionKey, motionMarks, motionRun);
   const itemsRef = useRef(null);
+  useInsightListLayoutMotion(itemsRef, animatedItems, motionRun);
   const previousVisibleCount = useRef(sourceItems.length);
   const hasMotion = animatedItems.some((item) => item.__motionState);
   const visibleCount = sourceItems.filter((item) => !item.__motionGhost).length;
@@ -1537,6 +1960,8 @@ function InsightList({ title, collectionKey, items, empty, motionMarks, motionRu
                 motionMark ? `motion-${motionMark}` : ""
               ].filter(Boolean).join(" ")}
               key={motionMark ? `${item.__motionKey || motionKey}-${motionMark}-${item.__motionBatch || motionRun}` : (item.__motionKey || motionKey)}
+              data-motion-key={item.__motionKey || motionKey}
+              data-motion-ghost={item.__motionGhost ? "true" : "false"}
               style={item.__motionGhost ? { "--ghost-index": ghostIndex } : undefined}
             >
               {renderItem(item, index)}

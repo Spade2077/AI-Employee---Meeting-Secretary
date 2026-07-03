@@ -1365,7 +1365,7 @@ func (s *Store) MoveActionItemToDecision(ctx context.Context, meetingID, actionI
 		ID:         newID("dec"),
 		MeetingID:  meetingID,
 		Content:    decisionContent,
-		SourceText: "待办：" + item.Task,
+		SourceText: "由待办转为决策：" + item.Task,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}

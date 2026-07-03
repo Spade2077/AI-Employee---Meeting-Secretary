@@ -21,20 +21,10 @@ func (s *Server) parseInteractionCommand(ctx context.Context, meetingID, instruc
 	}
 
 	localStarted := time.Now()
-	if command, ok := parseCorrectionLocally(instruction); ok {
-		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地口误纠错指令")
-		command = normalizeInteractionCommand(command)
-		bytes, _ := json.Marshal(command)
-		return command, string(bytes), nil
-	}
+	// 本地解析只保留系统级控制命令。所有业务写操作交给交互 LLM 生成标准 JSON，
+	// 后端再按白名单 intent 和工具注册表校验执行，避免固定规则互相误伤。
 	if command, ok := parseUndoLocally(instruction); ok {
 		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地撤销指令")
-		command = normalizeInteractionCommand(command)
-		bytes, _ := json.Marshal(command)
-		return command, string(bytes), nil
-	}
-	if command, ok := parseMeetingTitleLocally(instruction); ok {
-		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地会议标题指令")
 		command = normalizeInteractionCommand(command)
 		bytes, _ := json.Marshal(command)
 		return command, string(bytes), nil
@@ -52,64 +42,8 @@ func (s *Server) parseInteractionCommand(ctx context.Context, meetingID, instruc
 		return command, string(bytes), nil
 	}
 
-	if command, ok := parseDecisionMutationLocally(instruction, snapshot); ok {
-		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地决策修改指令")
-		command = normalizeInteractionCommand(command)
-		bytes, _ := json.Marshal(command)
-		return command, string(bytes), nil
-	}
-
 	if command, ok := parseMeetingViewLocally(instruction); ok {
 		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地页面切换指令")
-		command = normalizeInteractionCommand(command)
-		bytes, _ := json.Marshal(command)
-		return command, string(bytes), nil
-	}
-
-	if command, ok := parseSummaryRewriteLocally(instruction); ok {
-		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地摘要改写指令")
-		command = normalizeInteractionCommand(command)
-		bytes, _ := json.Marshal(command)
-		return command, string(bytes), nil
-	}
-
-	if command, ok := parseFrameworkSectionMutationLocally(instruction, snapshot); ok {
-		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地固定框架模块修改指令")
-		command = normalizeInteractionCommand(command)
-		bytes, _ := json.Marshal(command)
-		return command, string(bytes), nil
-	}
-
-	if command, ok := parseDynamicSectionDeleteMergeLocally(instruction, snapshot); ok {
-		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地动态模块删除/合并指令")
-		command = normalizeInteractionCommand(command)
-		bytes, _ := json.Marshal(command)
-		return command, string(bytes), nil
-	}
-
-	if command, ok := parseDynamicSectionMutationLocally(instruction, snapshot); ok {
-		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地动态模块写入指令")
-		command = normalizeInteractionCommand(command)
-		bytes, _ := json.Marshal(command)
-		return command, string(bytes), nil
-	}
-
-	if command, ok := parseDynamicSectionVisibilityLocally(instruction, snapshot); ok {
-		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地动态模块展示指令")
-		command = normalizeInteractionCommand(command)
-		bytes, _ := json.Marshal(command)
-		return command, string(bytes), nil
-	}
-
-	if command, ok := parseOpenQuestionMutationLocally(instruction, snapshot); ok {
-		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地待确认问题修改指令")
-		command = normalizeInteractionCommand(command)
-		bytes, _ := json.Marshal(command)
-		return command, string(bytes), nil
-	}
-
-	if command, ok := parseRiskMutationLocally(instruction, snapshot); ok {
-		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地风险修改指令")
 		command = normalizeInteractionCommand(command)
 		bytes, _ := json.Marshal(command)
 		return command, string(bytes), nil
@@ -131,17 +65,10 @@ func (s *Server) parseInteractionCommand(ctx context.Context, meetingID, instruc
 			return normalizeInteractionCommand(command), content, nil
 		}
 		log.Printf("interaction llm failed meeting=%s: %v", meetingID, err)
-	}
-
-	fallbackStarted := time.Now()
-	command, err := parseDeleteActionItemLocally(instruction)
-	timing.addStage("local_fallback_parse", "本地兜底解析", time.Since(fallbackStarted), "未调用 LLM；本地删除待办兜底")
-	if err != nil {
 		return InteractionCommand{}, "", err
 	}
-	command = normalizeInteractionCommand(command)
-	bytes, _ := json.Marshal(command)
-	return command, string(bytes), nil
+
+	return InteractionCommand{}, "", fmt.Errorf("interaction LLM is not configured")
 }
 
 func normalizeInteractionCommand(command InteractionCommand) InteractionCommand {
@@ -456,6 +383,9 @@ func parseEndMeetingLocally(instruction string) (InteractionCommand, bool) {
 	if text == "" {
 		return InteractionCommand{}, false
 	}
+	if looksLikeBusinessMutationInstruction(text) || looksLikeNegatedSystemControl(text) {
+		return InteractionCommand{}, false
+	}
 	key := strings.ToLower(text)
 	hasEnd := strings.Contains(key, "结束") ||
 		strings.Contains(key, "停止") ||
@@ -481,6 +411,9 @@ func parseEndMeetingLocally(instruction string) (InteractionCommand, bool) {
 func parseShowShareQRLocally(instruction string) (InteractionCommand, bool) {
 	text := strings.TrimSpace(instruction)
 	if text == "" {
+		return InteractionCommand{}, false
+	}
+	if looksLikeBusinessMutationInstruction(text) || looksLikeNegatedSystemControl(text) {
 		return InteractionCommand{}, false
 	}
 	key := strings.ToLower(text)
@@ -513,6 +446,9 @@ func parseMeetingViewLocally(instruction string) (InteractionCommand, bool) {
 		return InteractionCommand{}, false
 	}
 	lower := strings.ToLower(text)
+	if looksLikeBusinessMutationInstruction(lower) || looksLikeNegatedSystemControl(text) {
+		return InteractionCommand{}, false
+	}
 	hasViewVerb := strings.Contains(lower, "切换") ||
 		strings.Contains(lower, "打开") ||
 		strings.Contains(lower, "展示") ||
@@ -539,6 +475,19 @@ func parseMeetingViewLocally(instruction string) (InteractionCommand, bool) {
 		NeedConfirm: false,
 		Reply:       "已识别为页面切换指令。",
 	}, true
+}
+
+func looksLikeBusinessMutationInstruction(text string) bool {
+	key := normalizeForCompare(text)
+	if key == "" {
+		return false
+	}
+	hasBusinessTarget := containsNormalizedPhrase(key,
+		"待办", "任务", "决策", "风险", "待确认问题", "待确认", "动态模块", "自定义模块", "模块", "摘要", "总结", "会议标题")
+	hasMutationVerb := containsNormalizedPhrase(key,
+		"新增", "添加", "补充", "创建", "删除", "删掉", "去掉", "移除", "修改", "改成", "改为",
+		"调整为", "更新为", "设置为", "设为", "合并", "关闭", "完成", "解决", "负责人", "截止", "方案")
+	return hasBusinessTarget && hasMutationVerb
 }
 
 func parseSummaryRewriteLocally(instruction string) (InteractionCommand, bool) {
