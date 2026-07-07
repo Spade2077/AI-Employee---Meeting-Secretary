@@ -53,6 +53,8 @@ func (s *Store) Init(ctx context.Context) error {
 			provider TEXT NOT NULL DEFAULT 'manual',
 			confidence REAL NOT NULL DEFAULT 0,
 			is_deleted INTEGER NOT NULL DEFAULT 0,
+			started_at TEXT NOT NULL DEFAULT '',
+			ended_at TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
 			deleted_at TEXT,
 			FOREIGN KEY(meeting_id) REFERENCES meetings(id)
@@ -257,6 +259,12 @@ func (s *Store) Init(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "utterances", "confidence", "REAL NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "utterances", "started_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "utterances", "ended_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := s.ensureMeetingIntelligenceColumns(ctx); err != nil {
@@ -725,6 +733,8 @@ func (s *Store) AddTranscript(ctx context.Context, result stt.TranscriptResult) 
 	}
 	nowTime := time.Now().UTC()
 	now := nowTime.Format(time.RFC3339Nano)
+	startedAt := transcriptTimeString(result.StartedAt)
+	endedAt := transcriptTimeString(result.EndedAt)
 
 	if result.IsFinal {
 		latest, err := s.latestUtteranceForMerge(ctx, result.MeetingID, result.SpeakerLabel, result.Provider)
@@ -737,14 +747,18 @@ func (s *Store) AddTranscript(ctx context.Context, result stt.TranscriptResult) 
 			if result.Confidence > confidence {
 				confidence = result.Confidence
 			}
-			_, err := s.db.ExecContext(ctx, `UPDATE utterances SET text = ?, confidence = ?, is_final = 1 WHERE id = ?`,
-				updatedText, confidence, latest.ID)
+			mergedStartedAt := firstTranscriptTime(latest.StartedAt, startedAt)
+			mergedEndedAt := lastTranscriptTime(latest.EndedAt, endedAt)
+			_, err := s.db.ExecContext(ctx, `UPDATE utterances SET text = ?, confidence = ?, is_final = 1, started_at = ?, ended_at = ? WHERE id = ?`,
+				updatedText, confidence, mergedStartedAt, mergedEndedAt, latest.ID)
 			if err != nil {
 				return nil, err
 			}
 			latest.Text = updatedText
 			latest.Confidence = confidence
 			latest.IsFinal = true
+			latest.StartedAt = mergedStartedAt
+			latest.EndedAt = mergedEndedAt
 			return latest, nil
 		}
 	}
@@ -757,6 +771,8 @@ func (s *Store) AddTranscript(ctx context.Context, result stt.TranscriptResult) 
 		IsFinal:      result.IsFinal,
 		Provider:     result.Provider,
 		Confidence:   result.Confidence,
+		StartedAt:    startedAt,
+		EndedAt:      endedAt,
 		CreatedAt:    now,
 	}
 	isFinal := 0
@@ -764,10 +780,47 @@ func (s *Store) AddTranscript(ctx context.Context, result stt.TranscriptResult) 
 		isFinal = 1
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO utterances
-		(id, meeting_id, speaker_label, text, is_final, provider, confidence, is_deleted, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
-		u.ID, u.MeetingID, u.SpeakerLabel, u.Text, isFinal, u.Provider, u.Confidence, u.CreatedAt)
+		(id, meeting_id, speaker_label, text, is_final, provider, confidence, is_deleted, started_at, ended_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+		u.ID, u.MeetingID, u.SpeakerLabel, u.Text, isFinal, u.Provider, u.Confidence, u.StartedAt, u.EndedAt, u.CreatedAt)
 	return u, err
+}
+
+func transcriptTimeString(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func firstTranscriptTime(left, right string) string {
+	if strings.TrimSpace(left) == "" {
+		return right
+	}
+	if strings.TrimSpace(right) == "" {
+		return left
+	}
+	leftTime, leftErr := time.Parse(time.RFC3339Nano, left)
+	rightTime, rightErr := time.Parse(time.RFC3339Nano, right)
+	if leftErr == nil && rightErr == nil && rightTime.Before(leftTime) {
+		return right
+	}
+	return left
+}
+
+func lastTranscriptTime(left, right string) string {
+	if strings.TrimSpace(left) == "" {
+		return right
+	}
+	if strings.TrimSpace(right) == "" {
+		return left
+	}
+	leftTime, leftErr := time.Parse(time.RFC3339Nano, left)
+	rightTime, rightErr := time.Parse(time.RFC3339Nano, right)
+	if leftErr == nil && rightErr == nil && rightTime.After(leftTime) {
+		return right
+	}
+	return left
 }
 
 func scanUtterance(scanner interface {
@@ -776,7 +829,7 @@ func scanUtterance(scanner interface {
 	var u Utterance
 	var isFinal int
 	var deleted int
-	if err := scanner.Scan(&u.ID, &u.MeetingID, &u.SpeakerLabel, &u.Text, &isFinal, &u.Provider, &u.Confidence, &deleted, &u.CreatedAt, &u.DeletedAt); err != nil {
+	if err := scanner.Scan(&u.ID, &u.MeetingID, &u.SpeakerLabel, &u.Text, &isFinal, &u.Provider, &u.Confidence, &deleted, &u.StartedAt, &u.EndedAt, &u.CreatedAt, &u.DeletedAt); err != nil {
 		return nil, err
 	}
 	u.IsFinal = isFinal != 0
@@ -786,7 +839,7 @@ func scanUtterance(scanner interface {
 
 func (s *Store) latestUtteranceForMerge(ctx context.Context, meetingID, speakerLabel, provider string) (*Utterance, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, meeting_id, speaker_label, text, is_final, provider, confidence,
-		is_deleted, created_at, COALESCE(deleted_at, '')
+		is_deleted, COALESCE(started_at, ''), COALESCE(ended_at, ''), created_at, COALESCE(deleted_at, '')
 		FROM utterances
 		WHERE meeting_id = ? AND speaker_label = ? AND provider = ? AND is_deleted = 0
 		ORDER BY created_at DESC LIMIT 1`, meetingID, speakerLabel, provider)
@@ -840,7 +893,7 @@ func (s *Store) ListEvents(ctx context.Context, meetingID string) ([]StateEvent,
 
 func (s *Store) ListUtterances(ctx context.Context, meetingID string) ([]Utterance, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, meeting_id, speaker_label, text, is_final, provider, confidence,
-		is_deleted, created_at, COALESCE(deleted_at, '')
+		is_deleted, COALESCE(started_at, ''), COALESCE(ended_at, ''), created_at, COALESCE(deleted_at, '')
 		FROM utterances WHERE meeting_id = ? ORDER BY created_at ASC`, meetingID)
 	if err != nil {
 		return nil, err

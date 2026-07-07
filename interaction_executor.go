@@ -18,6 +18,25 @@ func (s *Server) executeInteractionCommandWithEventID(ctx context.Context, meeti
 	}
 
 	switch command.Intent {
+	case "start_meeting":
+		meeting, err := s.store.GetMeeting(ctx, meetingID)
+		if err != nil {
+			return nil, "读取会议状态失败。", err
+		}
+		switch MeetingStatus(meeting.Status) {
+		case StatusRecording:
+			return s.snapshotWithMessage(ctx, meetingID, "会议已经在记录中。")
+		case StatusStandby:
+			updated, event, err := s.store.Transition(ctx, meetingID, "start", "voice")
+			if err != nil {
+				return nil, "开始会议失败。", err
+			}
+			s.hub.Broadcast(s.stateUpdate(updated, event))
+			return s.snapshotWithMessage(ctx, meetingID, "已开始会议，正在记录转写。")
+		default:
+			return nil, "当前状态不能开始会议。", fmt.Errorf("cannot start meeting from %s", meeting.Status)
+		}
+
 	case "update_meeting_title":
 		result, err := s.executeInteractionTool(ctx, meetingID, eventID, 1, ToolMeetingUpdateTitle, meetingTitleToolArgsFromCommand(command))
 		if err != nil {
@@ -34,6 +53,20 @@ func (s *Server) executeInteractionCommandWithEventID(ctx context.Context, meeti
 			return nil, "没有识别到要切换到哪个页面。", fmt.Errorf("missing meeting view target")
 		}
 		return s.snapshotWithMessage(ctx, meetingID, fmt.Sprintf("已切换到%s。", meetingViewLabel(view)))
+
+	case "set_transcript_timestamps":
+		target := normalizeToggleTarget(command.TargetID)
+		if target == "" {
+			return nil, "没有识别到要打开还是关闭时间戳。", fmt.Errorf("missing timestamp toggle target")
+		}
+		return s.snapshotWithMessage(ctx, meetingID, transcriptTimestampReply(target))
+
+	case "scroll_summary":
+		action := normalizeScrollAction(command.TargetID)
+		if action == "" {
+			return nil, "没有识别到总结页滚动方向。", fmt.Errorf("missing summary scroll action")
+		}
+		return s.snapshotWithMessage(ctx, meetingID, summaryScrollReply(action))
 
 	case "show_share_qr":
 		return s.snapshotWithMessage(ctx, meetingID, "已打开会议纪要二维码。")

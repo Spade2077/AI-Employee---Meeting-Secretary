@@ -15,9 +15,17 @@ data/
 *.exe~
 meeting-web/dist/
 meeting-web/node_modules/
+local-asr-service/build/
+local-asr-service/build-sherpa/
+local-asr-service/.tmp/
+local-asr-service/models/
+.venv/
+__pycache__/
+*.pyc
 
 # Local build cache
 .cache/
+.tmp/
 
 # OS / IDE
 .DS_Store

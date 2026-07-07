@@ -21,7 +21,10 @@ const contentTypes = {
 
 createServer((request, response) => {
   const rawPath = decodeURIComponent(new URL(request.url, `http://${request.headers.host}`).pathname);
-  const requested = normalize(rawPath === "/" ? "/index.html" : rawPath);
+  const appPath = rawPath === "/meeting" || rawPath.startsWith("/meeting/")
+    ? rawPath.slice("/meeting".length) || "/"
+    : rawPath;
+  const requested = normalize(appPath === "/" ? "/index.html" : appPath);
   let filePath = join(root, requested);
 
   if (!filePath.startsWith(root) || !existsSync(filePath)) {

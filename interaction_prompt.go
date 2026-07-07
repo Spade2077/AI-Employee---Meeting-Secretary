@@ -128,8 +128,11 @@ func (s *Server) callLLMForInteraction(ctx context.Context, cfg *LLMConfig, inst
 	}
 
 	supportedIntents := []string{
+		"start_meeting",
 		"update_meeting_title",
 		"switch_meeting_view",
+		"set_transcript_timestamps",
+		"scroll_summary",
 		"show_share_qr",
 		"request_end_meeting",
 		"create_dynamic_section",
@@ -199,8 +202,8 @@ func (s *Server) callLLMForInteraction(ctx context.Context, cfg *LLMConfig, inst
 
 Return exactly this JSON shape:
 {
-  "intent": "update_meeting_title | switch_meeting_view | show_share_qr | request_end_meeting | create_dynamic_section | add_dynamic_section_item | update_dynamic_section | update_dynamic_section_item | delete_dynamic_section | merge_dynamic_sections | show_dynamic_section | hide_dynamic_section | show_all_dynamic_sections | hide_all_dynamic_sections | pin_dynamic_section | unpin_dynamic_section | delete_action_item | update_action_item | create_action_item | complete_action_item | move_action_item_to_decision | merge_action_items | delete_decision | update_decision | create_decision | merge_decisions | move_decision_to_action_item | create_risk | update_risk | close_risk | delete_risk | merge_risks | create_open_question | update_open_question | close_open_question | delete_open_question | merge_open_questions | rewrite_summary_section | undo_last_interaction | correct_last_interaction | unsupported",
-  "target_type": "meeting | meeting_view | share | dynamic_section | action_item | decision | risk | open_question | summary | interaction",
+  "intent": "start_meeting | update_meeting_title | switch_meeting_view | set_transcript_timestamps | scroll_summary | show_share_qr | request_end_meeting | create_dynamic_section | add_dynamic_section_item | update_dynamic_section | update_dynamic_section_item | delete_dynamic_section | merge_dynamic_sections | show_dynamic_section | hide_dynamic_section | show_all_dynamic_sections | hide_all_dynamic_sections | pin_dynamic_section | unpin_dynamic_section | delete_action_item | update_action_item | create_action_item | complete_action_item | move_action_item_to_decision | merge_action_items | delete_decision | update_decision | create_decision | merge_decisions | move_decision_to_action_item | create_risk | update_risk | close_risk | delete_risk | merge_risks | create_open_question | update_open_question | close_open_question | delete_open_question | merge_open_questions | rewrite_summary_section | undo_last_interaction | correct_last_interaction | unsupported",
+  "target_type": "meeting | meeting_view | transcript_timestamp | share | dynamic_section | action_item | decision | risk | open_question | summary | interaction",
   "target_index": 0,
   "target_id": "",
   "source_indices": [],
@@ -225,10 +228,13 @@ Return exactly this JSON shape:
 
 Rules:
 1. Use the supplied meeting_title, action_items, decisions, risks, open_questions, dynamic_sections, and summary as the only editable context.
-2. For update_meeting_title, target_type must be meeting and title is required. Use it for instructions like "把会议标题改成X", "设置标题为X", "这场会就叫X", or "会议名称改为X". Put the same value in content only for compatibility.
-3. For switch_meeting_view, target_type must be meeting_view. Use target_id/content as one of live or summary. Map "实时记录/转写/记录" to live. Map "会议总结/待办/决策/风险/待确认" to summary. Do not use switch_meeting_view for QR code, meeting minutes download, or ending the meeting.
-4. For show_share_qr, target_type must be share and target_id should be minutes_qr. Use this when the user asks to display/open/show the QR code, scan code, or meeting minutes download QR.
-5. For request_end_meeting, target_type must be meeting. Use this when the user asks to end/stop/close this meeting. The backend will only request confirmation; do not end directly.
+2. For start_meeting, target_type must be meeting. Use it when the user means the formal meeting should begin recording/transcribing, such as "开始会议", "正式开始吧", "可以开始记录了", "进入会议记录", or "start the meeting". Do not use it when "开始会议" is merely content inside a title, summary, task, decision, risk, or question edit.
+3. For update_meeting_title, target_type must be meeting and title is required. Use it for instructions like "把会议标题改成X", "设置标题为X", "这场会就叫X", or "会议名称改为X". Put the same value in content only for compatibility.
+4. For switch_meeting_view, target_type must be meeting_view. Use target_id/content as one of live or summary. Map "实时记录/转写/记录" to live. Map "会议总结/待办/决策/风险/待确认" to summary. Do not use switch_meeting_view for QR code, meeting minutes download, scrolling, timestamp display, or ending the meeting.
+5. For set_transcript_timestamps, target_type must be transcript_timestamp. Use target_id/content as on or off. Use on when the user wants transcript timestamps/time marks/time codes visible, e.g. "显示时间", "转写带上时间", "把时间给我露出来". Use off when the user wants timestamps hidden, e.g. "别显示时间", "时间戳收起来", "去掉转写时间".
+6. For scroll_summary, target_type must be meeting_view. Use target_id/content as up, down, or stop. Use down when the user wants to see lower/later content in the meeting summary, including "上滑", "往下翻", "继续往后看", "scroll down". Use up when the user wants upper/earlier content, including "下滑", "往上翻", "回到前面", "scroll up". Use stop for "停住", "停止滚动", "别动了".
+7. For show_share_qr, target_type must be share and target_id should be minutes_qr. Use this when the user asks to display/open/show the QR code, scan code, or meeting minutes download QR.
+8. For request_end_meeting, target_type must be meeting. Use this when the user asks to end/stop/close this meeting. The backend will only request confirmation; do not end directly.
 5a. For create_dynamic_section, target_type must be dynamic_section. Put the new module name in section_title and title. If the user also gives initial module content, put it in content. Use this for instructions like "add/create a budget constraints module" or "create a module for customer objections".
 5b. For add_dynamic_section_item, target_type must be dynamic_section. Use target_index/target_id or section_key/section_title from supplied dynamic_sections to identify one existing dynamic module, and put the new item content in content.
 5c. For update_dynamic_section, target_type must be dynamic_section. Use target_index/target_id or section_key/section_title from supplied dynamic_sections to identify one existing dynamic module. Put the new module description in content. Only use title when the user explicitly asks to rename the module.

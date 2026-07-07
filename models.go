@@ -12,7 +12,11 @@ const (
 )
 
 func CanUploadAudio(status MeetingStatus) bool {
-	return status == StatusRecording
+	return status == StatusStandby || status == StatusRecording
+}
+
+func CanPersistTranscript(status MeetingStatus) bool {
+	return status == StatusRecording || status == StatusEnding
 }
 
 type Config struct {
@@ -72,6 +76,8 @@ type Utterance struct {
 	Provider     string  `json:"provider"`
 	Confidence   float64 `json:"confidence"`
 	IsDeleted    bool    `json:"isDeleted"`
+	StartedAt    string  `json:"startedAt,omitempty"`
+	EndedAt      string  `json:"endedAt,omitempty"`
 	CreatedAt    string  `json:"createdAt"`
 	DeletedAt    string  `json:"deletedAt,omitempty"`
 }

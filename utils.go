@@ -226,7 +226,7 @@ func looksLikeInteractionCommandText(value string) bool {
 	if key == "" {
 		return false
 	}
-	if containsNormalizedPhrase(key, "小艾小艾", "小爱小爱", "小ai小ai") {
+	if containsNormalizedPhrase(key, "会议助手") {
 		return true
 	}
 	hasTarget := containsNormalizedPhrase(key,

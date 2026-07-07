@@ -15,18 +15,22 @@ import (
 
 type fakeLLMClient struct {
 	content string
+	calls   *int
 }
 
 func (f fakeLLMClient) Complete(ctx context.Context, cfg *LLMConfig, messages []LLMMessage, temperature float64) (string, error) {
+	if f.calls != nil {
+		*f.calls = *f.calls + 1
+	}
 	return f.content, nil
 }
 
 func TestExtractWakeInstruction(t *testing.T) {
-	wake, instruction, ok := extractWakeInstruction("小艾小艾，帮我把待办事项的第三条删掉")
+	wake, instruction, ok := extractWakeInstruction("会议助手，帮我把待办事项的第三条删掉")
 	if !ok {
 		t.Fatal("expected wake word to be detected")
 	}
-	if wake != "小艾小艾" {
+	if wake != "会议助手" {
 		t.Fatalf("unexpected wake word: %q", wake)
 	}
 	if instruction != "帮我把待办事项的第三条删掉" {
@@ -34,12 +38,12 @@ func TestExtractWakeInstruction(t *testing.T) {
 	}
 }
 
-func TestExtractWakeInstructionWithPunctuationBetweenWakeWords(t *testing.T) {
-	wake, instruction, ok := extractWakeInstruction("小爱，小爱，帮我把待办事项的第二条删掉")
+func TestExtractWakeInstructionWithPunctuationInsideWakeWord(t *testing.T) {
+	wake, instruction, ok := extractWakeInstruction("会议，助手，帮我把待办事项的第二条删掉")
 	if !ok {
 		t.Fatal("expected wake word with punctuation to be detected")
 	}
-	if wake != "小爱小爱" {
+	if wake != "会议助手" {
 		t.Fatalf("unexpected wake word: %q", wake)
 	}
 	if instruction != "帮我把待办事项的第二条删掉" {
@@ -69,10 +73,10 @@ func TestMeetingInteractionDeletesActionItem(t *testing.T) {
 	}
 	server.handleMeetingInteraction(ctx, stt.TranscriptResult{
 		MeetingID: meetingID,
-		Text:      "小艾小艾，帮我把待办事项的第三条删掉",
+		Text:      "会议助手，帮我把待办事项的第三条删掉",
 		IsFinal:   true,
 		Provider:  "test",
-	}, "小艾小艾", "帮我把待办事项的第三条删掉")
+	}, "会议助手", "帮我把待办事项的第三条删掉")
 
 	items, err := store.ListActionItems(ctx, meetingID)
 	if err != nil {
@@ -119,10 +123,10 @@ func TestMeetingInteractionConsumesSplitWakeAndInstruction(t *testing.T) {
 		}`},
 		pendingInteractions: map[string]*PendingInteraction{},
 	}
-	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "小", IsFinal: true, Provider: "test"}) {
+	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "会", IsFinal: true, Provider: "test"}) {
 		t.Fatal("expected wake prefix to be consumed")
 	}
-	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "小爱，小爱", IsFinal: true, Provider: "test"}) {
+	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "会议助手", IsFinal: true, Provider: "test"}) {
 		t.Fatal("expected wake phrase to be consumed")
 	}
 	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "帮我把待办事项的第二", IsFinal: true, Provider: "test"}) {
@@ -159,7 +163,7 @@ func TestInteractionEditModeConsumesCommandsUntilExit(t *testing.T) {
 	}
 	meetingID := "m_edit_mode"
 
-	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "小艾小艾，进入修改模式", IsFinal: true, Provider: "test"}) {
+	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "会议助手，进入修改模式", IsFinal: true, Provider: "test"}) {
 		t.Fatal("expected enter edit mode command to be consumed")
 	}
 	if !server.interactionEditModeActive(meetingID, time.Now()) {
@@ -212,14 +216,69 @@ func TestLocalSystemCommandsIgnoreBusinessContent(t *testing.T) {
 	if _, ok := parseMeetingViewLocally("不要切换到会议总结，继续停留在实时记录"); ok {
 		t.Fatal("negated page switch should not trigger meeting view switch")
 	}
+	if _, ok := parseStartMeetingLocally("把会议标题改成开始会议"); ok {
+		t.Fatal("business title update should not trigger start meeting")
+	}
 	if _, ok := parseEndMeetingLocally("结束会议"); !ok {
 		t.Fatal("direct end meeting command should still be recognized")
+	}
+	if command, ok := parseStartMeetingLocally("开始会议"); !ok || command.Intent != "start_meeting" {
+		t.Fatal("direct start meeting command should still be recognized")
 	}
 	if _, ok := parseShowShareQRLocally("显示二维码"); !ok {
 		t.Fatal("direct qr display command should still be recognized")
 	}
 	if _, ok := parseMeetingViewLocally("切换到会议总结页面"); !ok {
 		t.Fatal("direct page switch command should still be recognized")
+	}
+	if command, ok := parseTranscriptTimestampLocally("打开时间戳"); !ok || command.TargetID != "on" {
+		t.Fatal("direct timestamp on command should be recognized")
+	}
+	if command, ok := parseTranscriptTimestampLocally("关闭时间戳"); !ok || command.TargetID != "off" {
+		t.Fatal("direct timestamp off command should be recognized")
+	}
+	if command, ok := parseSummaryScrollLocally("会议总结往下滑"); !ok || command.TargetID != "down" {
+		t.Fatal("summary scroll down command should be recognized")
+	}
+	if command, ok := parseSummaryScrollLocally("会议总结上滑"); !ok || command.TargetID != "down" {
+		t.Fatal("summary swipe up command should scroll down to lower content")
+	}
+	if command, ok := parseSummaryScrollLocally("会议总结下滑"); !ok || command.TargetID != "up" {
+		t.Fatal("summary swipe down command should scroll up to upper content")
+	}
+	if command, ok := parseSummaryScrollLocally("会议总结停止滚动"); !ok || command.TargetID != "stop" {
+		t.Fatal("summary scroll stop command should be recognized")
+	}
+}
+
+func TestSystemControlCommandsUseInteractionLLM(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	if _, err := store.SaveLLMConfigFor(ctx, LLMUseCaseInteraction, LLMConfig{BaseURL: "https://llm.example/v1", Model: "test-model"}); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	server := &Server{
+		store: store,
+		hub:   NewHub(),
+		llmClient: fakeLLMClient{content: `{
+			"intent": "start_meeting",
+			"target_type": "meeting",
+			"confidence": 0.95,
+			"need_confirm": false,
+			"reply": "已开始会议。"
+		}`, calls: &calls},
+	}
+
+	command, _, err := server.parseInteractionCommand(ctx, meetingID, "正式开始吧", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected interaction LLM to be called once, got %d", calls)
+	}
+	if command.Intent != "start_meeting" || command.TargetType != "meeting" {
+		t.Fatalf("unexpected command: %#v", command)
 	}
 }
 
@@ -385,6 +444,30 @@ func TestInteractionCommandExecutionCoversSupportedIntents(t *testing.T) {
 		!strings.Contains(snapshot.Summary.Content, "报名人数") ||
 		strings.Contains(snapshot.Summary.Content, "人员时间冲突") {
 		t.Fatalf("expected summary undo to restore previous content, got %#v", snapshot.Summary)
+	}
+}
+
+func TestInteractionStartMeetingCommandTransitionsFromStandby(t *testing.T) {
+	ctx := context.Background()
+	store, meetingID := newInteractionStore(t, ctx)
+	server := &Server{store: store, hub: NewHub()}
+
+	_, message, err := server.executeInteractionCommand(ctx, meetingID, InteractionCommand{
+		Intent:     "start_meeting",
+		TargetType: "meeting",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(message, "已开始会议") {
+		t.Fatalf("unexpected message: %q", message)
+	}
+	meeting, err := store.GetMeeting(ctx, meetingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meeting.Status != string(StatusRecording) {
+		t.Fatalf("expected recording status, got %s", meeting.Status)
 	}
 }
 
@@ -1111,7 +1194,7 @@ func TestInteractionCommandWaitsForStableTranscript(t *testing.T) {
 		recentInteractions:  map[string][]recentInteractionTranscript{},
 	}
 
-	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "小艾小艾，新增一个待确认问题，客户现场", IsFinal: true, Provider: "test"}) {
+	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "会议助手，新增一个待确认问题，客户现场", IsFinal: true, Provider: "test"}) {
 		t.Fatal("expected partial command to be consumed")
 	}
 	time.Sleep(1200 * time.Millisecond)
@@ -1892,7 +1975,7 @@ func TestRecentInteractionEchoIsConsumedAfterCommandFires(t *testing.T) {
 		recentInteractions:  map[string][]recentInteractionTranscript{},
 	}
 
-	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "小艾小艾，新增一个成本控制模块", IsFinal: true, Provider: "test"}) {
+	if !server.consumeInteractionTranscript(stt.TranscriptResult{MeetingID: meetingID, Text: "会议助手，新增一个成本控制模块", IsFinal: true, Provider: "test"}) {
 		t.Fatal("expected wake command to be consumed")
 	}
 	waitFor(t, 5*time.Second, func() bool {
@@ -2166,7 +2249,7 @@ func TestInteractionCommandUpdatesFrameworkSections(t *testing.T) {
 		TargetType:   "framework_section",
 		SectionTitle: "当前进展",
 		Content:      "实时转写已经稳定，结构化提取还在优化。",
-		Instruction:  "小艾小艾，把当前进展改成实时转写已经稳定，结构化提取还在优化。",
+		Instruction:  "会议助手，把当前进展改成实时转写已经稳定，结构化提取还在优化。",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2184,7 +2267,7 @@ func TestInteractionCommandUpdatesFrameworkSections(t *testing.T) {
 		TargetType:  "framework_section",
 		SectionKey:  "current_progress",
 		Content:     "本周重点是验证会中交互链路。",
-		Instruction: "小艾小艾，补充当前进展，本周重点是验证会中交互链路。",
+		Instruction: "会议助手，补充当前进展，本周重点是验证会中交互链路。",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2198,7 +2281,7 @@ func TestInteractionCommandUpdatesFrameworkSections(t *testing.T) {
 		Intent:       "clear_framework_section",
 		TargetType:   "framework_section",
 		SectionTitle: "当前进展",
-		Instruction:  "小艾小艾，清空当前进展。",
+		Instruction:  "会议助手，清空当前进展。",
 	})
 	if err != nil {
 		t.Fatal(err)

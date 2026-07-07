@@ -53,7 +53,9 @@ func NewAdapter(provider string) (Adapter, error) {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "", "volcano", "volcano_asr", "volcano-asr":
 		return NewVolcanoAdapterFromEnv()
+	case "local", "local_asr", "local-asr", "sensevoice", "sensevoice-small", "sensevoice_small":
+		return NewLocalAdapterFromEnv()
 	default:
-		return nil, fmt.Errorf("unsupported STT_PROVIDER %q; supported providers: volcano", provider)
+		return nil, fmt.Errorf("unsupported STT_PROVIDER %q; supported providers: volcano, local", provider)
 	}
 }

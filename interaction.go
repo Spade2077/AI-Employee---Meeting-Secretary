@@ -11,23 +11,14 @@ import (
 )
 
 var wakeWords = []string{
-	"小艾小艾",
-	"小爱小爱",
-	"小艾小爱",
-	"小爱小艾",
-	"小AI小AI",
-	"小A小A",
+	"会议助手",
 }
 
 var wakeWordPatterns = []struct {
 	label   string
 	pattern *regexp.Regexp
 }{
-	{label: "小艾小艾", pattern: regexp.MustCompile(`(?i)小\s*艾\s*[,，、。.!！？?\s]*小\s*艾`)},
-	{label: "小爱小爱", pattern: regexp.MustCompile(`(?i)小\s*爱\s*[,，、。.!！？?\s]*小\s*爱`)},
-	{label: "小艾小爱", pattern: regexp.MustCompile(`(?i)小\s*艾\s*[,，、。.!！？?\s]*小\s*爱`)},
-	{label: "小爱小艾", pattern: regexp.MustCompile(`(?i)小\s*爱\s*[,，、。.!！？?\s]*小\s*艾`)},
-	{label: "小AI小AI", pattern: regexp.MustCompile(`(?i)小\s*a\s*i?\s*[,，、。.!！？?\s]*小\s*a\s*i?`)},
+	{label: "会议助手", pattern: regexp.MustCompile(`(?i)会\s*议\s*[,，、。.!！？?\s]*助\s*手`)},
 }
 
 const (

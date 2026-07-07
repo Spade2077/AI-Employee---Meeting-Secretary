@@ -44,10 +44,10 @@ const STATUS_LABELS = {
 };
 
 const INTERACTION_STEPS = [
-  { key: "received", label: "语音指令识别中", detail: "等待唤醒词与指令文本" },
-  { key: "understanding", label: "LLM 理解中", detail: "解析意图与参数" },
-  { key: "executing", label: "工具执行中", detail: "调用后端会议工具" },
-  { key: "completed", label: "执行完成", detail: "同步结果与耗时" }
+  { key: "received", label: "指令识别" },
+  { key: "understanding", label: "LLM 理解" },
+  { key: "executing", label: "工具执行" },
+  { key: "completed", label: "完成" }
 ];
 
 const ITEM_MOTION_MS = 9600;
@@ -55,6 +55,9 @@ const DELETE_MOTION_MS = 5200;
 const DELETE_FILL_MOTION_MS = 980;
 const MODAL_TRANSITION_MS = 420;
 const TARGET_AUDIO_SAMPLE_RATE = 16000;
+const SPEECH_PEAK_THRESHOLD = 900;
+const TRANSCRIPT_DONE_VISIBLE_MS = 1500;
+const INTERACTION_DONE_VISIBLE_MS = 6500;
 
 const INSIGHT_COLLECTIONS = [
   ...(MEETING_FRAMEWORK_UI_ENABLED ? [{ key: "frameworkSections" }] : []),
@@ -160,6 +163,32 @@ function formatDuration(seconds) {
     return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
   }
   return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
+function formatCompactDuration(ms) {
+  const value = Math.max(0, Number(ms) || 0);
+  if (value < 1000) return `${Math.round(value)}ms`;
+  const seconds = value / 1000;
+  return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
+}
+
+function parseTimeMs(value) {
+  const time = Date.parse(value || "");
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function interactionEventTime(event) {
+  return parseTimeMs(event?.completedAt || event?.createdAt);
+}
+
+function compactStatusText(value, maxChars = 22) {
+  const text = String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) || "";
+  const chars = Array.from(text.replace(/\s+/g, " "));
+  if (chars.length <= maxChars) return chars.join("");
+  return `${chars.slice(0, maxChars).join("")}...`;
 }
 
 function normalizeInteractionMode(update) {
@@ -480,6 +509,23 @@ function inferViewFromInteraction(event) {
   return "";
 }
 
+function timestampToggleFromInteraction(event) {
+  if (event?.intent !== "set_transcript_timestamps") return null;
+  const text = `${event.targetId || ""} ${event.message || ""} ${event.instruction || ""}`.toLowerCase();
+  if (/off|关闭|关掉|隐藏|取消|不要显示/.test(text)) return false;
+  if (/on|打开|开启|显示|展示|加上|带上/.test(text)) return true;
+  return null;
+}
+
+function summaryScrollActionFromInteraction(event) {
+  if (event?.intent !== "scroll_summary") return "";
+  const text = `${event.targetId || ""} ${event.message || ""} ${event.instruction || ""}`.toLowerCase();
+  if (/stop|停止|停下|不要动/.test(text)) return "stop";
+  if (/down|上滑|向下|往下|下滚/.test(text)) return "down";
+  if (/up|下滑|向上|往上|上滚/.test(text)) return "up";
+  return "";
+}
+
 function interactionPhase(statusUpdate, event) {
   if (statusUpdate?.status === "executing") return "executing";
   if (statusUpdate?.status === "understanding") return "understanding";
@@ -487,8 +533,116 @@ function interactionPhase(statusUpdate, event) {
   return event.executionStatus === "success" ? "completed" : "failed";
 }
 
-function buildTranscriptText(utterances) {
-  return rebuildArticleTranscript(visibleItems(utterances)).join("");
+function visibleInteractionPhase(statusUpdate, event, now) {
+  if (statusUpdate?.status) {
+    return interactionPhase(statusUpdate, null) || "received";
+  }
+  if (!event) return "";
+  const eventTime = interactionEventTime(event);
+  if (!eventTime || now - eventTime > INTERACTION_DONE_VISIBLE_MS) return "";
+  return interactionPhase(null, event);
+}
+
+function buildAssistantStatus({ meetingStatus, micState, lastTranscriptAt, interactionStatus, lastInteraction, phase, now }) {
+  const isListeningMode = meetingStatus === "standby" || meetingStatus === "recording";
+  const micConnected = micState?.status === "connected";
+  const micError = micState?.status === "error";
+  const recentTranscriptDone = lastTranscriptAt > 0 && now - lastTranscriptAt < TRANSCRIPT_DONE_VISIBLE_MS;
+  const hasVoice = micConnected && Number(micState?.peak || 0) > SPEECH_PEAK_THRESHOLD;
+
+  let asr = { label: "未监听", tone: "idle", model: "本地 ASR" };
+  if (micError) {
+    asr = { label: "音频异常", tone: "failed", model: "本地 ASR" };
+  } else if (phase === "understanding") {
+    asr = { label: "识别中", tone: "recognizing", model: "SenseVoice" };
+  } else if (phase) {
+    asr = { label: "已完成", tone: "completed", model: "SenseVoice" };
+  } else if (recentTranscriptDone) {
+    asr = { label: "已完成", tone: "completed", model: "已写入转写" };
+  } else if (isListeningMode && hasVoice) {
+    asr = { label: "检测到语音", tone: "speaking", model: "本地 ASR" };
+  } else if (isListeningMode && micConnected) {
+    asr = { label: "监听中", tone: "listening", model: "本地 ASR" };
+  } else if (isListeningMode) {
+    asr = { label: "等待麦克风", tone: "idle", model: "本地 ASR" };
+  } else if (meetingStatus === "ended") {
+    asr = { label: "已结束", tone: "idle", model: "本地 ASR" };
+  }
+
+  let assistant = { label: "会议助手待命", tone: "idle" };
+  if (phase === "understanding") {
+    assistant = { label: "会议助手：理解中", tone: "running" };
+  } else if (phase === "executing") {
+    assistant = { label: "会议助手：工具执行中", tone: "running" };
+  } else if (phase === "completed") {
+    const cost = lastInteraction?.durationMs ? `，用时 ${formatCompactDuration(lastInteraction.durationMs)}` : "";
+    assistant = { label: `会议助手：已完成${cost}`, tone: "completed" };
+  } else if (phase === "failed") {
+    const reason = compactStatusText(lastInteraction?.errorMessage || lastInteraction?.message || interactionStatus?.message || "未找到目标", 12);
+    assistant = { label: `会议助手：失败，${reason}`, tone: "failed" };
+  }
+
+  return { asr, assistant, phase };
+}
+
+function buildTranscriptRows(utterances) {
+  const rows = [];
+  for (const item of visibleItems(utterances)) {
+    if (item?.isFinal === false) continue;
+    const text = normalizeTranscriptText(item?.text || "");
+    if (!text) continue;
+    const speakerLabel = String(item?.speakerLabel || "speaker_1").trim() || "speaker_1";
+    const last = rows[rows.length - 1];
+    if (last && last.speakerLabel === speakerLabel) {
+      if (text.startsWith(last.text)) {
+        last.text = text;
+      } else if (!last.text.startsWith(text)) {
+        last.text = `${last.text}${needsLeadingSpace(last.text, text) ? " " : ""}${text}`;
+      }
+      last.id = item.id || last.id;
+      last.endedAt = item.endedAt || item.createdAt || last.endedAt;
+      last.createdAt = item.createdAt || last.createdAt;
+      continue;
+    }
+    rows.push({
+      id: item.id || `${speakerLabel}-${rows.length}`,
+      speakerLabel,
+      speakerName: speakerDisplayName(speakerLabel),
+      startedAt: item.startedAt || item.createdAt || "",
+      endedAt: item.endedAt || item.createdAt || "",
+      createdAt: item.createdAt || "",
+      text
+    });
+  }
+  return rows;
+}
+
+function formatTranscriptTimestamp(row) {
+  const value = row?.startedAt || row?.createdAt || "";
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  });
+}
+
+function speakerDisplayName(label) {
+  const normalized = String(label || "").trim();
+  const match = normalized.match(/^speaker[_-]?(\d+)$/i);
+  if (match) return `发言人 ${match[1]}`;
+  if (!normalized || normalized === "unknown") return "未知发言人";
+  return normalized;
+}
+
+function speakerTone(label) {
+  const normalized = String(label || "").trim();
+  const match = normalized.match(/(\d+)/);
+  const value = match ? Number(match[1]) : Array.from(normalized).reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  return `speaker-tone-${Math.abs(value || 1) % 6}`;
 }
 
 function rebuildArticleTranscript(utterances) {
@@ -862,6 +1016,8 @@ export default function App() {
   const motionTimers = useRef([]);
   const previousStatusRef = useRef("standby");
   const audioRef = useRef(createEmptyAudioState());
+  const summaryPageRef = useRef(null);
+  const summaryScrollTimer = useRef(0);
 
   const [meeting, setMeeting] = useState(null);
   const [meetingID, setMeetingID] = useState("");
@@ -876,6 +1032,11 @@ export default function App() {
   const [interactionStatus, setInteractionStatus] = useState(null);
   const [interactionMode, setInteractionMode] = useState(() => normalizeInteractionMode(null));
   const [intelligenceStatus, setIntelligenceStatus] = useState(null);
+  const [lastTranscriptAt, setLastTranscriptAt] = useState(0);
+  const [assistantClock, setAssistantClock] = useState(() => Date.now());
+  const [showTranscriptTimestamps, setShowTranscriptTimestamps] = useState(() => (
+    localStorage.getItem("meetingTranscriptShowTimestamps") === "1"
+  ));
   const [activeView, setActiveViewState] = useState(() => {
     const savedView = localStorage.getItem("meetingDisplayView") || "live";
     return VIEW_LABELS[savedView] ? savedView : "live";
@@ -883,7 +1044,6 @@ export default function App() {
   const [viewVersion, setViewVersion] = useState(0);
   const [shareOpen, setShareOpen] = useState(false);
   const [endConfirmOpen, setEndConfirmOpen] = useState(false);
-  const [interactionCollapsed, setInteractionCollapsed] = useState(() => localStorage.getItem("interactionDockCollapsed") !== "false");
   const [hostControlOpen, setHostControlOpen] = useState(false);
   const [hostBusy, setHostBusy] = useState("");
   const [hostError, setHostError] = useState("");
@@ -893,8 +1053,20 @@ export default function App() {
   const [socketState, setSocketState] = useState("connecting");
 
   const lastInteraction = interactions.length ? interactions[interactions.length - 1] : null;
-  const transcriptText = useMemo(() => buildTranscriptText(utterances), [utterances]);
-  const phase = interactionPhase(interactionStatus, lastInteraction);
+  const transcriptRows = useMemo(() => buildTranscriptRows(utterances), [utterances]);
+  const phase = visibleInteractionPhase(interactionStatus, lastInteraction, assistantClock);
+  const assistantStatus = useMemo(
+    () => buildAssistantStatus({
+      meetingStatus: status,
+      micState,
+      lastTranscriptAt,
+      interactionStatus,
+      lastInteraction,
+      phase,
+      now: assistantClock
+    }),
+    [assistantClock, interactionStatus, lastInteraction, lastTranscriptAt, micState, phase, status]
+  );
   const title = meetingTitle(meeting, snapshot);
   const type = meetingType(meeting, snapshot);
 
@@ -963,20 +1135,46 @@ export default function App() {
     }
   }, []);
 
+  const stopSummaryScroll = useCallback(() => {
+    if (summaryScrollTimer.current) {
+      window.clearInterval(summaryScrollTimer.current);
+      summaryScrollTimer.current = 0;
+    }
+  }, []);
+
+  const startSummaryScroll = useCallback((direction) => {
+    const action = direction === "up" ? "up" : direction === "down" ? "down" : "stop";
+    if (action === "stop") {
+      stopSummaryScroll();
+      return;
+    }
+    setActiveView("summary", false);
+    stopSummaryScroll();
+    window.setTimeout(() => {
+      const element = summaryPageRef.current;
+      if (!element) return;
+      const delta = action === "up" ? -5 : 5;
+      summaryScrollTimer.current = window.setInterval(() => {
+        const target = summaryPageRef.current;
+        if (!target) {
+          stopSummaryScroll();
+          return;
+        }
+        target.scrollBy({ top: delta, behavior: "auto" });
+      }, 16);
+    }, 80);
+  }, [setActiveView, stopSummaryScroll]);
+
+  useEffect(() => {
+    localStorage.setItem("meetingTranscriptShowTimestamps", showTranscriptTimestamps ? "1" : "0");
+  }, [showTranscriptTimestamps]);
+
   const acceptMeetingID = useCallback((id) => {
     if (!id) return false;
     if (routeMeetingID.current && id !== routeMeetingID.current) return false;
     currentMeetingID.current = id;
     setMeetingID(id);
     return true;
-  }, []);
-
-  const toggleInteractionDock = useCallback(() => {
-    setInteractionCollapsed((collapsed) => {
-      const next = !collapsed;
-      localStorage.setItem("interactionDockCollapsed", String(next));
-      return next;
-    });
   }, []);
 
   const bindRouteToMeeting = useCallback((id) => {
@@ -1218,13 +1416,14 @@ export default function App() {
       applyStateUpdate(update);
       if (id) {
         await loadMeetingData(id);
+        await startMeetingAudio(id);
       }
     } catch (error) {
       setHostError(error.message || "创建会议失败");
     } finally {
       setHostBusy("");
     }
-  }, [applyStateUpdate, bindRouteToMeeting, loadMeetingData, stopMeetingAudio]);
+  }, [applyStateUpdate, bindRouteToMeeting, loadMeetingData, startMeetingAudio, stopMeetingAudio]);
 
   const startMeetingFromDisplay = useCallback(async () => {
     if (!meetingID) {
@@ -1276,7 +1475,61 @@ export default function App() {
     hydrate();
   }, [hydrate]);
 
+  useEffect(() => {
+    if (!meetingID) return undefined;
+    if (status === "standby" || status === "recording") {
+      let cancelled = false;
+      startMeetingAudio(meetingID).catch((error) => {
+        if (cancelled) return;
+        setMicState((state) => ({
+          ...state,
+          status: "error",
+          message: error?.message || "麦克风未开启"
+        }));
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (status === "ending" || status === "ended") {
+      stopMeetingAudio();
+    }
+    return undefined;
+  }, [meetingID, startMeetingAudio, status, stopMeetingAudio]);
+
+  useEffect(() => {
+    if (!lastTranscriptAt) return undefined;
+    const remaining = TRANSCRIPT_DONE_VISIBLE_MS - (Date.now() - lastTranscriptAt);
+    if (remaining <= 0) return undefined;
+    const timer = window.setTimeout(() => setAssistantClock(Date.now()), remaining + 40);
+    return () => window.clearTimeout(timer);
+  }, [lastTranscriptAt]);
+
+  useEffect(() => {
+    if (interactionStatus) {
+      setAssistantClock(Date.now());
+      return undefined;
+    }
+    const eventTime = interactionEventTime(lastInteraction);
+    if (!eventTime) return undefined;
+    const remaining = INTERACTION_DONE_VISIBLE_MS - (Date.now() - eventTime);
+    if (remaining <= 0) {
+      setAssistantClock(Date.now());
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setAssistantClock(Date.now()), remaining + 40);
+    return () => window.clearTimeout(timer);
+  }, [interactionStatus, lastInteraction]);
+
   useEffect(() => () => clearMotionTimers(), [clearMotionTimers]);
+
+  useEffect(() => () => stopSummaryScroll(), [stopSummaryScroll]);
+
+  useEffect(() => {
+    if (activeView !== "summary") {
+      stopSummaryScroll();
+    }
+  }, [activeView, stopSummaryScroll]);
 
   useEffect(() => () => stopMeetingAudio(), [stopMeetingAudio]);
 
@@ -1350,6 +1603,9 @@ export default function App() {
 
         if (message.type === "transcript_delta" && message.utterance) {
           if (!acceptMeetingID(message.meetingId)) return;
+          const now = Date.now();
+          setLastTranscriptAt(now);
+          setAssistantClock(now);
           setUtterances((items) => {
             const next = visibleItems(items).filter((item) => item.id !== message.utterance.id);
             return [...next, message.utterance];
@@ -1383,6 +1639,7 @@ export default function App() {
 
         if (message.type === "interaction_status") {
           if (message.meetingId) acceptMeetingID(message.meetingId);
+          setAssistantClock(Date.now());
           setInteractionStatus(message);
         }
 
@@ -1393,6 +1650,7 @@ export default function App() {
 
         if (message.type === "interaction_update" && message.event) {
           if (message.meetingId) acceptMeetingID(message.meetingId);
+          setAssistantClock(Date.now());
           setInteractionStatus(null);
           setInteractions((items) => {
             const next = items.filter((item) => item.id !== message.event.id);
@@ -1410,6 +1668,14 @@ export default function App() {
           }
           if (message.event.intent === "request_end_meeting") {
             setEndConfirmOpen(true);
+          }
+          const timestampToggle = timestampToggleFromInteraction(message.event);
+          if (timestampToggle !== null) {
+            setShowTranscriptTimestamps(timestampToggle);
+          }
+          const summaryScrollAction = summaryScrollActionFromInteraction(message.event);
+          if (summaryScrollAction) {
+            startSummaryScroll(summaryScrollAction);
           }
           const nextView = inferViewFromInteraction(message.event);
           if (nextView) {
@@ -1431,7 +1697,7 @@ export default function App() {
       window.clearTimeout(wsReconnectTimer.current);
       if (socket) socket.close();
     };
-  }, [acceptMeetingID, applyIntelligenceSnapshot, applyStateUpdate, setActiveView, shouldSkipDuplicateSnapshot, suppressNextDuplicateSnapshot]);
+  }, [acceptMeetingID, applyIntelligenceSnapshot, applyStateUpdate, setActiveView, shouldSkipDuplicateSnapshot, startSummaryScroll, suppressNextDuplicateSnapshot]);
 
   const counts = {
     decisions: snapshot.decisions.length,
@@ -1451,6 +1717,7 @@ export default function App() {
         duration={durationSeconds}
         socketState={socketState}
         interactionMode={interactionMode}
+        assistantStatus={assistantStatus}
         activeView={activeView}
         typeSaving={meetingTypeSaving}
         onViewChange={setActiveView}
@@ -1464,11 +1731,13 @@ export default function App() {
         <div key={`${activeView}-${viewVersion}`} className={`view-frame view-frame-${activeView}`}>
           {activeView === "live" ? (
             <LiveView
-              transcriptText={transcriptText}
+              transcriptRows={transcriptRows}
               summary={snapshot.summary}
               counts={counts}
               utteranceCount={utterances.length}
               intelligenceStatus={intelligenceStatus}
+              showTimestamps={showTranscriptTimestamps}
+              onToggleTimestamps={setShowTranscriptTimestamps}
             />
           ) : (
             <BookView
@@ -1478,6 +1747,7 @@ export default function App() {
               intelligenceStatus={intelligenceStatus}
               motionMarks={motionMarks}
               motionRun={motionRun}
+              pageRef={summaryPageRef}
             />
           )}
         </div>
@@ -1485,8 +1755,6 @@ export default function App() {
           phase={phase}
           statusUpdate={interactionStatus}
           event={lastInteraction}
-          collapsed={interactionCollapsed}
-          onToggle={toggleInteractionDock}
         />
         <HostControlDock
           open={hostControlOpen}
@@ -1520,7 +1788,7 @@ export default function App() {
   );
 }
 
-function Header({ title, type, meetingID, status, duration, socketState, interactionMode, activeView, typeSaving, onViewChange, onTypeChange, onOpenShare }) {
+function Header({ title, type, meetingID, status, duration, socketState, interactionMode, assistantStatus, activeView, typeSaving, onViewChange, onTypeChange, onOpenShare }) {
   const previousTitle = useRef(title);
   const [titleRun, setTitleRun] = useState(0);
 
@@ -1535,7 +1803,10 @@ function Header({ title, type, meetingID, status, duration, socketState, interac
     <header className="topbar">
       <div className="identity">
         <span className="eyebrow">AI Meeting Secretary</span>
-        <h1 key={`${title}-${titleRun}`} className={titleRun > 0 ? "title-motion" : ""}>{title}</h1>
+        <div className="title-row">
+          <h1 key={`${title}-${titleRun}`} className={titleRun > 0 ? "title-motion" : ""}>{title}</h1>
+          <AssistantStatusBar status={assistantStatus} />
+        </div>
         <div className="meta-line">
           {MEETING_FRAMEWORK_UI_ENABLED ? (
             <label className="type-select-wrap">
@@ -1648,18 +1919,36 @@ function StatusPill({ label, tone, title }) {
   return <span className={`status-pill ${tone || ""}`} title={title || label}>{label}</span>;
 }
 
-function LiveView({ transcriptText, summary, counts, utteranceCount, intelligenceStatus }) {
+function AssistantStatusBar({ status }) {
+  const asr = status?.asr || { label: "未监听", tone: "idle", model: "本地 ASR" };
+  const assistant = status?.assistant || { label: "会议助手待命", tone: "idle" };
+  const label = `会议助手状态：${asr.label}，${asr.model}，${assistant.label}`;
+
+  return (
+    <div className="assistant-status-bar" aria-label={label} title={label}>
+      <span className={`assistant-status-chip assistant-asr ${asr.tone}`}>
+        <span className="assistant-status-dot" aria-hidden="true" />
+        <span>{asr.label}</span>
+      </span>
+      <span className="assistant-status-chip assistant-model">{asr.model}</span>
+      <span className={`assistant-status-chip assistant-command ${assistant.tone}`}>{assistant.label}</span>
+    </div>
+  );
+}
+
+function LiveView({ transcriptRows, summary, counts, utteranceCount, intelligenceStatus, showTimestamps, onToggleTimestamps }) {
   const transcriptRef = useRef(null);
   const brief = summaryText(summary);
+  const hasTranscript = Array.isArray(transcriptRows) && transcriptRows.length > 0;
 
   useEffect(() => {
     const element = transcriptRef.current;
-    if (!element || !transcriptText) return;
+    if (!element || !hasTranscript) return;
     const frame = window.requestAnimationFrame(() => {
       element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [transcriptText, utteranceCount]);
+  }, [hasTranscript, transcriptRows, utteranceCount]);
 
   return (
     <div className="live-layout">
@@ -1669,10 +1958,28 @@ function LiveView({ transcriptText, summary, counts, utteranceCount, intelligenc
             <p className="panel-kicker">Realtime Transcript</p>
             <h2>全文转写</h2>
           </div>
-          <span className="count-badge">{utteranceCount} 段</span>
+          <div className="transcript-head-actions">
+            <label className="timestamp-toggle">
+              <input
+                type="checkbox"
+                checked={showTimestamps}
+                onChange={(event) => onToggleTimestamps(event.target.checked)}
+              />
+              <span>时间戳</span>
+            </label>
+            <span className="count-badge">{utteranceCount} 段</span>
+          </div>
         </div>
-        <div ref={transcriptRef} className={`transcript-body ${transcriptText ? "" : "placeholder"}`}>
-          {transcriptText || "等待会议开始，转写内容会在这里按全文连续展示。"}
+        <div ref={transcriptRef} className={`transcript-body ${hasTranscript ? "" : "placeholder"}`}>
+          {hasTranscript ? transcriptRows.map((row) => (
+            <article className="transcript-row" key={row.id}>
+              <div className="transcript-row-meta">
+                <span className={`speaker-badge ${speakerTone(row.speakerLabel)}`}>{row.speakerName}</span>
+                {showTimestamps && <time className="transcript-timestamp">{formatTranscriptTimestamp(row)}</time>}
+              </div>
+              <p>{row.text}</p>
+            </article>
+          )) : "等待会议开始，转写内容会在这里按全文连续展示。"}
         </div>
       </section>
 
@@ -1748,10 +2055,10 @@ function SummarySection({ label, value, values, wide = false }) {
   );
 }
 
-function BookView({ view, snapshot, meetingType, intelligenceStatus, motionMarks, motionRun }) {
+function BookView({ view, snapshot, meetingType, intelligenceStatus, motionMarks, motionRun, pageRef }) {
   return (
     <div className="book-stage">
-      <section className="book-page" aria-label={VIEW_LABELS[view]}>
+      <section ref={pageRef} className="book-page" aria-label={VIEW_LABELS[view]}>
         <div className="book-head">
           <div>
             <p className="panel-kicker">Structured Intelligence</p>
@@ -1973,30 +2280,23 @@ function InsightList({ title, collectionKey, items, empty, motionMarks, motionRu
   );
 }
 
-function InteractionDock({ phase, statusUpdate, event, collapsed, onToggle }) {
-  const instruction = event?.instruction || event?.rawTranscript || statusUpdate?.message || "等待“小艾小艾”语音指令";
+function InteractionDock({ phase, statusUpdate, event }) {
+  if (!phase) return null;
+
+  const instruction = event?.instruction || event?.rawTranscript || statusUpdate?.message || "等待“会议助手”语音指令";
   const failed = phase === "failed";
-  const message = failed ? (event?.errorMessage || event?.message || "执行失败") : (event?.message || statusUpdate?.message || "语音交互模块待命中。");
-  const total = event?.durationMs ? `${event.durationMs} ms` : "";
+  const phaseLabel = failed ? "失败" : phase === "completed" ? "已完成" : phase === "executing" ? "工具执行中" : "理解中";
+  const message = failed
+    ? compactStatusText(event?.errorMessage || event?.message || "未找到目标", 28)
+    : compactStatusText(event?.message || statusUpdate?.message || phaseLabel, 34);
+  const total = event?.durationMs ? formatCompactDuration(event.durationMs) : "";
   const currentPhase = phase || "";
 
   return (
-    <aside className={`interaction-dock ${phase ? "active" : ""} ${failed ? "failed" : ""} ${collapsed ? "collapsed" : ""}`} aria-label="语音交互状态">
-      <button type="button" className="dock-toggle" onClick={onToggle} aria-label={collapsed ? "展开语音交互侧栏" : "收起语音交互侧栏"}>
-        {collapsed ? (
-          <span className="collapsed-dock-content">
-            <span className="collapsed-dots" aria-hidden="true">
-              {INTERACTION_STEPS.map((step) => (
-                <span key={step.key} className={`collapsed-dot ${stepClass(step.key, phase)}`} />
-              ))}
-            </span>
-            <span className="collapsed-label">语音</span>
-          </span>
-        ) : "收"}
-      </button>
+    <aside className={`interaction-dock active ${failed ? "failed" : ""}`} aria-label="语音交互处理进度">
       <div className="dock-head">
-        <span>语音交互</span>
-        <strong>{failed ? "失败" : phase === "completed" ? "完成" : phase ? "处理中" : "待命"}</strong>
+        <span>会议助手语音指令</span>
+        <strong>{phaseLabel}</strong>
       </div>
       <div className="step-list" aria-label="语音交互处理进度">
         {INTERACTION_STEPS.map((step) => (
@@ -2004,18 +2304,14 @@ function InteractionDock({ phase, statusUpdate, event, collapsed, onToggle }) {
             key={step.key}
             className={`step ${stepClass(step.key, currentPhase)}`}
           >
+            <span className="step-node" aria-hidden="true" />
             <strong>{step.label}</strong>
-            <span>{step.detail}</span>
           </div>
         ))}
       </div>
-      <div className="instruction-card">
-        <span>识别到的指令</span>
-        <p>{instruction}</p>
-      </div>
-      <div className="interaction-result">
-        <p>{message}</p>
-        {total ? <small>总耗时：{total}</small> : null}
+      <div className="interaction-brief" title={`${instruction}\n${message}`}>
+        <span>{compactStatusText(instruction, 30)}</span>
+        <strong>{message}{total ? ` / ${total}` : ""}</strong>
       </div>
     </aside>
   );

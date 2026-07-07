@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"regexp"
@@ -18,35 +17,6 @@ func (s *Server) parseInteractionCommand(ctx context.Context, meetingID, instruc
 	timing.addStage("load_context", "读取结构化上下文", time.Since(contextStarted), "")
 	if err != nil {
 		return InteractionCommand{}, "", err
-	}
-
-	localStarted := time.Now()
-	// 本地解析只保留系统级控制命令。所有业务写操作交给交互 LLM 生成标准 JSON，
-	// 后端再按白名单 intent 和工具注册表校验执行，避免固定规则互相误伤。
-	if command, ok := parseUndoLocally(instruction); ok {
-		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地撤销指令")
-		command = normalizeInteractionCommand(command)
-		bytes, _ := json.Marshal(command)
-		return command, string(bytes), nil
-	}
-	if command, ok := parseEndMeetingLocally(instruction); ok {
-		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地结束会议确认指令")
-		command = normalizeInteractionCommand(command)
-		bytes, _ := json.Marshal(command)
-		return command, string(bytes), nil
-	}
-	if command, ok := parseShowShareQRLocally(instruction); ok {
-		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地二维码展示指令")
-		command = normalizeInteractionCommand(command)
-		bytes, _ := json.Marshal(command)
-		return command, string(bytes), nil
-	}
-
-	if command, ok := parseMeetingViewLocally(instruction); ok {
-		timing.addStage("local_parse", "本地解析指令", time.Since(localStarted), "未调用 LLM；本地页面切换指令")
-		command = normalizeInteractionCommand(command)
-		bytes, _ := json.Marshal(command)
-		return command, string(bytes), nil
 	}
 
 	configStarted := time.Now()
@@ -98,6 +68,10 @@ func normalizeInteractionCommand(command InteractionCommand) InteractionCommand 
 	command.SourceIndices = positiveUniqueInts(command.SourceIndices)
 
 	switch command.Intent {
+	case "start_meeting":
+		if command.TargetType == "" {
+			command.TargetType = "meeting"
+		}
 	case "update_meeting_title":
 		if command.TargetType == "" {
 			command.TargetType = "meeting"
@@ -115,6 +89,26 @@ func normalizeInteractionCommand(command InteractionCommand) InteractionCommand 
 		}
 		command.TargetID = view
 		command.Content = view
+	case "set_transcript_timestamps":
+		if command.TargetType == "" {
+			command.TargetType = "transcript_timestamp"
+		}
+		target := normalizeToggleTarget(command.TargetID)
+		if target == "" {
+			target = normalizeToggleTarget(command.Content)
+		}
+		command.TargetID = target
+		command.Content = target
+	case "scroll_summary":
+		if command.TargetType == "" {
+			command.TargetType = "meeting_view"
+		}
+		action := normalizeScrollAction(command.TargetID)
+		if action == "" {
+			action = normalizeScrollAction(command.Content)
+		}
+		command.TargetID = action
+		command.Content = action
 	case "show_share_qr":
 		if command.TargetType == "" {
 			command.TargetType = "share"
@@ -318,7 +312,7 @@ func isPrimaryUndoInstruction(instruction string) bool {
 func trimNormalizedPoliteLead(key string) string {
 	for {
 		changed := false
-		for _, prefix := range []string{"帮我", "请帮我", "请", "麻烦", "麻烦你", "小艾", "小爱"} {
+		for _, prefix := range []string{"帮我", "请帮我", "请", "麻烦", "麻烦你", "会议助手"} {
 			normalized := normalizeForCompare(prefix)
 			if strings.HasPrefix(key, normalized) {
 				key = strings.TrimPrefix(key, normalized)
@@ -329,6 +323,130 @@ func trimNormalizedPoliteLead(key string) string {
 			return key
 		}
 	}
+}
+
+func parseStartMeetingLocally(instruction string) (InteractionCommand, bool) {
+	text := strings.TrimSpace(instruction)
+	if text == "" || looksLikeBusinessMutationInstruction(text) || looksLikeNegatedSystemControl(text) {
+		return InteractionCommand{}, false
+	}
+	key := normalizeForCompare(text)
+	if key == "" {
+		return InteractionCommand{}, false
+	}
+	hasStart := containsNormalizedPhrase(key, "开始", "启动", "开启", "进入记录", "开始记录", "开始转写", "start")
+	hasMeeting := containsNormalizedPhrase(key, "会议", "本次", "记录", "转写", "meeting")
+	if !hasStart || !hasMeeting {
+		return InteractionCommand{}, false
+	}
+	return InteractionCommand{
+		Intent:      "start_meeting",
+		TargetType:  "meeting",
+		Confidence:  0.92,
+		NeedConfirm: false,
+		Reply:       "已识别为开始会议。",
+	}, true
+}
+
+func parseTranscriptTimestampLocally(instruction string) (InteractionCommand, bool) {
+	text := strings.TrimSpace(instruction)
+	if text == "" || looksLikeNegatedSystemControl(text) {
+		return InteractionCommand{}, false
+	}
+	key := normalizeForCompare(text)
+	if key == "" || !containsNormalizedPhrase(key, "时间戳", "时间码", "timestamp", "timestamps") {
+		return InteractionCommand{}, false
+	}
+	target := ""
+	if containsNormalizedPhrase(key, "打开", "开启", "显示", "展示", "加上", "带上", "显示出来", "show", "enable", "on") {
+		target = "on"
+	}
+	if containsNormalizedPhrase(key, "关闭", "隐藏", "去掉", "不要显示", "取消", "关掉", "hide", "disable", "off") {
+		target = "off"
+	}
+	if target == "" {
+		return InteractionCommand{}, false
+	}
+	return InteractionCommand{
+		Intent:      "set_transcript_timestamps",
+		TargetType:  "transcript_timestamp",
+		TargetID:    target,
+		Content:     target,
+		Confidence:  0.9,
+		NeedConfirm: false,
+		Reply:       transcriptTimestampReply(target),
+	}, true
+}
+
+func transcriptTimestampReply(target string) string {
+	if target == "off" {
+		return "已关闭转写时间戳。"
+	}
+	return "已打开转写时间戳。"
+}
+
+func parseSummaryScrollLocally(instruction string) (InteractionCommand, bool) {
+	text := strings.TrimSpace(instruction)
+	if text == "" || looksLikeNegatedSystemControl(text) {
+		return InteractionCommand{}, false
+	}
+	key := normalizeForCompare(text)
+	if key == "" || !containsNormalizedPhrase(key, "总结", "摘要", "纪要", "会议总结", "summary") {
+		return InteractionCommand{}, false
+	}
+	action := normalizeScrollAction(key)
+	if action == "" {
+		return InteractionCommand{}, false
+	}
+	return InteractionCommand{
+		Intent:      "scroll_summary",
+		TargetType:  "meeting_view",
+		TargetID:    action,
+		Content:     action,
+		Confidence:  0.88,
+		NeedConfirm: false,
+		Reply:       summaryScrollReply(action),
+	}, true
+}
+
+func summaryScrollReply(action string) string {
+	switch action {
+	case "up":
+		return "会议总结向上滚动。"
+	case "down":
+		return "会议总结向下滚动。"
+	default:
+		return "已停止会议总结滚动。"
+	}
+}
+
+func normalizeToggleTarget(value string) string {
+	key := normalizeForCompare(value)
+	switch key {
+	case "on", "open", "enable", "enabled", "true", "1", "打开", "开启", "显示", "展示":
+		return "on"
+	case "off", "close", "disable", "disabled", "false", "0", "关闭", "关掉", "隐藏", "取消":
+		return "off"
+	default:
+		return ""
+	}
+}
+
+func normalizeScrollAction(value string) string {
+	key := normalizeForCompare(value)
+	if key == "" {
+		return ""
+	}
+	if containsNormalizedPhrase(key, "停止", "停下", "暂停滚动", "停止滚动", "不要动", "stop") {
+		return "stop"
+	}
+	if containsNormalizedPhrase(key, "上滑", "往下", "向下", "向下滚", "往下滚", "下滚", "继续往下", "scroll down", "down") {
+		return "down"
+	}
+	if containsNormalizedPhrase(key, "下滑", "往上", "向上", "向上滚", "往上滚", "上滚", "继续往上", "scroll up", "up") {
+		return "up"
+	}
+	return ""
 }
 
 func parseMeetingTitleLocally(instruction string) (InteractionCommand, bool) {

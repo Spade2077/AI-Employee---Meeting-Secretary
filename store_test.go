@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
+	"time"
 
 	"meeting-core-service/internal/stt"
 
@@ -717,7 +718,7 @@ func TestManualFrameworkSectionLocksAgainstAutomaticExtraction(t *testing.T) {
 	manual, err := store.ApplyFrameworkSectionMutation(ctx, meeting.ID, "project_followup", "current_progress", FrameworkSectionMutation{
 		Mode:       "replace",
 		Content:    "人工确认：实时转写已稳定，结构化提取还在优化。",
-		SourceText: "小艾小艾，把当前进展改成实时转写已稳定，结构化提取还在优化。",
+		SourceText: "会议助手，把当前进展改成实时转写已稳定，结构化提取还在优化。",
 		Locked:     true,
 	})
 	if err != nil {
@@ -861,12 +862,17 @@ func TestAddTranscriptMergesNearbySimilarFinalResults(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	startedAt := time.Date(2026, 7, 6, 9, 30, 1, 0, time.UTC)
+	firstEndedAt := startedAt.Add(3 * time.Second)
+	secondEndedAt := startedAt.Add(7 * time.Second)
 	first, err := store.AddTranscript(ctx, stt.TranscriptResult{
 		MeetingID:    meeting.ID,
 		SpeakerLabel: "unknown",
 		Text:         "继续排查Volcano ASR连接保持逻辑，重点关注是否应该在暂停期间保持连接以及是否需要等待",
 		IsFinal:      true,
 		Provider:     "volcano",
+		StartedAt:    startedAt,
+		EndedAt:      firstEndedAt,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -877,6 +883,8 @@ func TestAddTranscriptMergesNearbySimilarFinalResults(t *testing.T) {
 		Text:         "排查Volcano ASR连接保持逻辑，重点关注是否应该在暂停期间保持连接以及是否需要等待会议结束时的服务器正常关闭，并在本周五前给出结论。",
 		IsFinal:      true,
 		Provider:     "volcano",
+		StartedAt:    startedAt.Add(500 * time.Millisecond),
+		EndedAt:      secondEndedAt,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -894,6 +902,12 @@ func TestAddTranscriptMergesNearbySimilarFinalResults(t *testing.T) {
 	}
 	if !strings.Contains(utterances[0].Text, "服务器正常关闭") {
 		t.Fatalf("expected richer transcript to be retained, got %q", utterances[0].Text)
+	}
+	if utterances[0].StartedAt != startedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("StartedAt = %q", utterances[0].StartedAt)
+	}
+	if utterances[0].EndedAt != secondEndedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("EndedAt = %q", utterances[0].EndedAt)
 	}
 }
 

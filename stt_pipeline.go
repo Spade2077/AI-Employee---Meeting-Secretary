@@ -48,6 +48,10 @@ func (s *Server) noteSTTResult(meetingID string) {
 }
 
 func (s *Server) maybeRestartStuckSTT(ctx context.Context, meetingID string, peak int) {
+	if s.sttAdapter.Provider() == stt.ProviderLocal {
+		return
+	}
+
 	const voicePeakThreshold = 80
 	if peak < voicePeakThreshold {
 		return
@@ -141,6 +145,15 @@ func (s *Server) consumeSTT(ctx context.Context) {
 			}
 			s.noteSTTResult(result.MeetingID)
 			if s.consumeInteractionTranscript(result) {
+				continue
+			}
+			meeting, err := s.store.GetMeeting(ctx, result.MeetingID)
+			if err != nil {
+				log.Printf("read meeting before transcript persist failed meeting=%s provider=%s: %v", result.MeetingID, result.Provider, err)
+				continue
+			}
+			if !CanPersistTranscript(MeetingStatus(meeting.Status)) {
+				log.Printf("drop non-command transcript meeting=%s status=%s provider=%s", result.MeetingID, meeting.Status, result.Provider)
 				continue
 			}
 			utterance, err := s.store.AddTranscript(ctx, result)

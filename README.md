@@ -44,6 +44,8 @@ STT_PROVIDER=volcano
 VOLCANO_APP_ID=your_app_id
 VOLCANO_ACCESS_TOKEN=your_access_token
 VOLCANO_SECRET_KEY=your_secret_key
+# 切本地 ASR 时使用
+LOCAL_ASR_URL=http://127.0.0.1:9001
 ```
 
 服务启动时会先读取当前目录 `.env`，再尝试读取 `../volcano-asr-demo/.env`。因此可以直接复用原 demo 的火山凭证文件。
@@ -53,10 +55,27 @@ VOLCANO_SECRET_KEY=your_secret_key
 当前内置：
 
 - `STT_PROVIDER=volcano`
+- `STT_PROVIDER=local` / `STT_PROVIDER=sensevoice-small`
 - `GET /api/meetings/{id}/audio/ws`
 - `POST /api/meetings/{id}/utterances`，仅用于手动录入测试转写
 
-后续接本地 ASR 时，实现同一个 adapter 接口或本地 ASR 服务适配即可。会议状态机、大屏事件和数据库不需要跟着供应商改。
+切换本地 ASR 时，先启动 `local-asr-service`，再把 `.env` 改成：
+
+```env
+STT_PROVIDER=local
+LOCAL_ASR_URL=http://127.0.0.1:9001
+```
+
+会议状态机、大屏事件、数据库、结构化纪要和会中交互不需要跟着供应商改。
+
+本地 ASR 协议已经固定在：
+
+- `internal/stt/contract.go`
+- `docs/local-asr-contract.md`
+
+SenseVoice-Small 最小服务骨架在：
+
+- `local-asr-service/`
 
 标准转写事件：
 
