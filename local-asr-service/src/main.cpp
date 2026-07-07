@@ -47,8 +47,8 @@ constexpr int kFrameMs = 20;
 struct Config {
   int port = 9001;
   int vadThreshold = 500;
-  int endSilenceMs = 600;
-  int minSpeechMs = 300;
+  int endSilenceMs = 750;
+  int minSpeechMs = 500;
   int senseVoiceNumThreads = 4;
   bool senseVoiceUseITN = true;
   bool senseVoiceEnablePunctuation = true;

@@ -54,9 +54,9 @@ class Config:
     vad_threshold: int = 120
     vad_peak_threshold: int = 900
     vad_noise_ratio: float = 3.0
-    end_silence_ms: int = 550
+    end_silence_ms: int = 750
     min_speech_ms: int = 500
-    max_segment_ms: int = 8000
+    max_segment_ms: int = 12000
     pre_speech_ms: int = 300
     normalize_peak: int = 8000
     max_gain: float = 4.0
@@ -748,9 +748,9 @@ def load_config() -> Config:
     parser.add_argument("--vad-threshold", type=int, default=int(os.getenv("LOCAL_ASR_VAD_THRESHOLD", "120")))
     parser.add_argument("--vad-peak-threshold", type=int, default=int(os.getenv("LOCAL_ASR_VAD_PEAK_THRESHOLD", "900")))
     parser.add_argument("--vad-noise-ratio", type=float, default=float(os.getenv("LOCAL_ASR_VAD_NOISE_RATIO", "3.0")))
-    parser.add_argument("--end-silence-ms", type=int, default=int(os.getenv("LOCAL_ASR_END_SILENCE_MS", "550")))
+    parser.add_argument("--end-silence-ms", type=int, default=int(os.getenv("LOCAL_ASR_END_SILENCE_MS", "750")))
     parser.add_argument("--min-speech-ms", type=int, default=int(os.getenv("LOCAL_ASR_MIN_SPEECH_MS", "500")))
-    parser.add_argument("--max-segment-ms", type=int, default=int(os.getenv("LOCAL_ASR_MAX_SEGMENT_MS", "8000")))
+    parser.add_argument("--max-segment-ms", type=int, default=int(os.getenv("LOCAL_ASR_MAX_SEGMENT_MS", "12000")))
     parser.add_argument("--pre-speech-ms", type=int, default=int(os.getenv("LOCAL_ASR_PRE_SPEECH_MS", "300")))
     parser.add_argument("--normalize-peak", type=int, default=int(os.getenv("LOCAL_ASR_NORMALIZE_PEAK", "8000")))
     parser.add_argument("--max-gain", type=float, default=float(os.getenv("LOCAL_ASR_MAX_GAIN", "4")))
