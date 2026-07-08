@@ -1084,6 +1084,7 @@ func (s *Store) RestoreActionItem(ctx context.Context, item MeetingActionItem) (
 	}
 	item.UpdatedAt = now
 	item.Status = normalizeActionItemStatus(item.Status)
+	completeActionItemFieldsFromText(&item)
 	item.MissingFields = missingFieldsForActionItem(&item)
 	_, err := s.db.ExecContext(ctx, `INSERT INTO meeting_action_items
 		(id, meeting_id, task, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at)
@@ -1127,6 +1128,7 @@ func (s *Store) CreateActionItem(ctx context.Context, meetingID string, mutation
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
+	completeActionItemFieldsFromText(item)
 	item.MissingFields = missingFieldsForActionItem(item)
 	_, err := s.db.ExecContext(ctx, `INSERT INTO meeting_action_items
 		(id, meeting_id, task, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at)
@@ -1166,6 +1168,7 @@ func (s *Store) UpdateActionItem(ctx context.Context, meetingID, actionItemID st
 		return nil, fmt.Errorf("action item task cannot be empty")
 	}
 	item.UpdatedAt = nowString()
+	completeActionItemFieldsFromText(item)
 	item.MissingFields = missingFieldsForActionItem(item)
 	_, err = s.db.ExecContext(ctx, `UPDATE meeting_action_items SET
 		task = ?, owner = ?, due_date = ?, status = ?, missing_fields = ?, source_text = ?, updated_at = ?
@@ -1372,6 +1375,7 @@ func (s *Store) MoveDecisionToActionItem(ctx context.Context, meetingID, decisio
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
+	completeActionItemFieldsFromText(item)
 	item.MissingFields = missingFieldsForActionItem(item)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO meeting_action_items
 		(id, meeting_id, task, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at)
@@ -1503,6 +1507,7 @@ func (s *Store) MergeActionItems(ctx context.Context, meetingID string, actionIt
 	}
 	now := nowString()
 	merged.UpdatedAt = now
+	completeActionItemFieldsFromText(&merged)
 	merged.MissingFields = missingFieldsForActionItem(&merged)
 	if _, err := tx.ExecContext(ctx, `UPDATE meeting_action_items SET
 		task = ?, owner = ?, due_date = ?, status = ?, missing_fields = ?, source_text = ?, updated_at = ?
@@ -2387,6 +2392,7 @@ func scanActionItem(scanner interface {
 	}
 	item.IsDeleted = deleted != 0
 	item.Status = normalizeActionItemStatus(item.Status)
+	completeActionItemFieldsFromText(&item)
 	item.MissingFields = missingFieldsForActionItem(&item)
 	return &item, nil
 }
@@ -2596,12 +2602,19 @@ func mergeExistingActionItemsTx(ctx context.Context, tx *sql.Tx, items []Meeting
 			updatedDueDate := preferRevisionText(target.DueDate, item.DueDate, item.SourceText)
 			updatedStatus := preferFilledText(target.Status, item.Status)
 			updatedSource := mergeSourceText(target.SourceText, item.SourceText)
-			updatedMissingFields := missingFieldsForActionItem(&MeetingActionItem{
-				Task:    updatedTask,
-				Owner:   updatedOwner,
-				DueDate: updatedDueDate,
-				Status:  updatedStatus,
-			})
+			updatedItem := MeetingActionItem{
+				Task:       updatedTask,
+				Owner:      updatedOwner,
+				DueDate:    updatedDueDate,
+				Status:     updatedStatus,
+				SourceText: updatedSource,
+			}
+			completeActionItemFieldsFromText(&updatedItem)
+			updatedTask = updatedItem.Task
+			updatedOwner = updatedItem.Owner
+			updatedDueDate = updatedItem.DueDate
+			updatedSource = updatedItem.SourceText
+			updatedMissingFields := missingFieldsForActionItem(&updatedItem)
 			if updatedTask != target.Task ||
 				updatedOwner != target.Owner ||
 				updatedDueDate != target.DueDate ||

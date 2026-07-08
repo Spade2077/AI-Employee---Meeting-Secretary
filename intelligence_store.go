@@ -314,17 +314,18 @@ func saveDecisionExtractionsTx(ctx context.Context, tx *sql.Tx, meetingID string
 
 func saveActionItemExtractionsTx(ctx context.Context, tx *sql.Tx, meetingID string, existingActionItems []MeetingActionItem, items []ActionItemExtraction, now string) error {
 	for _, item := range items {
-		task := strings.TrimSpace(item.Task)
+		completeActionItemExtractionFieldsFromText(&item)
+		task := item.Task
 		if task == "" || normalizeForCompare(task) == "" {
 			continue
 		}
-		owner := strings.TrimSpace(item.Owner)
-		dueDate := strings.TrimSpace(item.DueDate)
+		owner := item.Owner
+		dueDate := item.DueDate
 		status := strings.TrimSpace(item.Status)
 		if status == "" {
 			status = "open"
 		}
-		sourceText := strings.TrimSpace(item.SourceText)
+		sourceText := item.SourceText
 		if looksLikeInteractionCommandText(task) || looksLikeInteractionCommandText(sourceText) {
 			continue
 		}
@@ -335,12 +336,19 @@ func saveActionItemExtractionsTx(ctx context.Context, tx *sql.Tx, meetingID stri
 			updatedDueDate := preferRevisionText(merged.DueDate, dueDate, sourceText)
 			updatedStatus := preferFilledText(merged.Status, status)
 			updatedSource := mergeSourceText(merged.SourceText, sourceText)
-			updatedMissingFields := missingFieldsForActionItem(&MeetingActionItem{
-				Task:    updatedTask,
-				Owner:   updatedOwner,
-				DueDate: updatedDueDate,
-				Status:  updatedStatus,
-			})
+			updatedItem := MeetingActionItem{
+				Task:       updatedTask,
+				Owner:      updatedOwner,
+				DueDate:    updatedDueDate,
+				Status:     updatedStatus,
+				SourceText: updatedSource,
+			}
+			completeActionItemFieldsFromText(&updatedItem)
+			updatedTask = updatedItem.Task
+			updatedOwner = updatedItem.Owner
+			updatedDueDate = updatedItem.DueDate
+			updatedSource = updatedItem.SourceText
+			updatedMissingFields := missingFieldsForActionItem(&updatedItem)
 			if updatedTask == merged.Task &&
 				updatedOwner == merged.Owner &&
 				updatedDueDate == merged.DueDate &&
@@ -367,12 +375,19 @@ func saveActionItemExtractionsTx(ctx context.Context, tx *sql.Tx, meetingID stri
 			continue
 		}
 		actionItemID := newID("act")
-		missingFields := missingFieldsForActionItem(&MeetingActionItem{
-			Task:    task,
-			Owner:   owner,
-			DueDate: dueDate,
-			Status:  status,
-		})
+		newItem := MeetingActionItem{
+			Task:       task,
+			Owner:      owner,
+			DueDate:    dueDate,
+			Status:     status,
+			SourceText: sourceText,
+		}
+		completeActionItemFieldsFromText(&newItem)
+		task = newItem.Task
+		owner = newItem.Owner
+		dueDate = newItem.DueDate
+		sourceText = newItem.SourceText
+		missingFields := missingFieldsForActionItem(&newItem)
 		_, err := tx.ExecContext(ctx, `INSERT INTO meeting_action_items
 			(id, meeting_id, task, owner, due_date, status, missing_fields, source_text, is_deleted, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,

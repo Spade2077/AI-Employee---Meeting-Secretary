@@ -557,10 +557,7 @@ func normalizeIntelligenceExtraction(result *IntelligenceExtraction) {
 	result.MeetingType = normalizeMeetingType(result.MeetingType)
 	result.Summary = normalizeSummaryExtraction(result.Summary)
 	for i := range result.ActionItems {
-		result.ActionItems[i].Task = strings.TrimSpace(result.ActionItems[i].Task)
-		result.ActionItems[i].Owner = strings.TrimSpace(result.ActionItems[i].Owner)
-		result.ActionItems[i].DueDate = strings.TrimSpace(result.ActionItems[i].DueDate)
-		result.ActionItems[i].SourceText = strings.TrimSpace(result.ActionItems[i].SourceText)
+		completeActionItemExtractionFieldsFromText(&result.ActionItems[i])
 		if strings.TrimSpace(result.ActionItems[i].Status) == "" {
 			result.ActionItems[i].Status = "open"
 		}
